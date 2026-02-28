@@ -11,8 +11,11 @@ export class LiveSessionClient {
   private url: string;
   private destroyed = false;
 
-  constructor(url = `ws://${window.location.host}/ws`) {
-    this.url = url;
+  constructor(url?: string) {
+    // In Tauri the page is served from tauri:// so window.location.host is wrong.
+    // Fall back to the explicit backend port.
+    const isTauri = typeof window !== 'undefined' && '__TAURI__' in window;
+    this.url = url ?? (isTauri ? 'ws://localhost:3456/ws' : `ws://${window.location.host}/ws`);
   }
 
   connect(): void {

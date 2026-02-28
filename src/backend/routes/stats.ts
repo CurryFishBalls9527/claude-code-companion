@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { getDashboardStats, getTopFiles, getToolUsage } from '../services/stats-service.js';
+import { getDashboardStats, getTopFiles, getToolUsage, getToolTiming } from '../services/stats-service.js';
 
 export const statsRouter = Router();
 
@@ -34,5 +34,17 @@ statsRouter.get('/tool-usage', async (req, res) => {
   } catch (err) {
     console.error('[/api/stats/tool-usage]', err);
     res.status(500).json({ error: 'Failed to compute tool usage' });
+  }
+});
+
+// GET /api/stats/tool-timing?sessionId=<optional>
+statsRouter.get('/tool-timing', async (req, res) => {
+  try {
+    const sessionId = req.query.sessionId ? String(req.query.sessionId) : undefined;
+    const timing = await getToolTiming(sessionId);
+    res.json(timing);
+  } catch (err) {
+    console.error('[/api/stats/tool-timing]', err);
+    res.status(500).json({ error: 'Failed to compute tool timing' });
   }
 });

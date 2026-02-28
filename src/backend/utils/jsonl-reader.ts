@@ -8,17 +8,30 @@ import type { RawSessionEntry } from '../../shared/types.js';
  * Skips malformed lines silently.
  */
 export async function* readJsonl(filePath: string): AsyncGenerator<RawSessionEntry> {
-  const stream = createReadStream(filePath, { encoding: 'utf-8' });
+  let stream;
+  try {
+    stream = createReadStream(filePath, { encoding: 'utf-8' });
+  } catch {
+    return;
+  }
   const rl = createInterface({ input: stream, crlfDelay: Infinity });
+  // Handle stream errors (e.g. ENOENT) gracefully
+  let streamError = false;
+  stream.on('error', () => { streamError = true; rl.close(); });
 
-  for await (const line of rl) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    try {
-      yield JSON.parse(trimmed) as RawSessionEntry;
-    } catch {
-      // Skip malformed lines
+  try {
+    for await (const line of rl) {
+      if (streamError) break;
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      try {
+        yield JSON.parse(trimmed) as RawSessionEntry;
+      } catch {
+        // Skip malformed lines
+      }
     }
+  } catch {
+    // Stream closed due to error
   }
 }
 

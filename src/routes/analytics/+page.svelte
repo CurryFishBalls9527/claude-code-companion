@@ -1,21 +1,60 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { api } from '$lib/api/client.js';
-  import type { DashboardStats } from '$shared/types.js';
+  import type { DashboardStats, ToolTiming, CostBudget } from '$shared/types.js';
+  import { allMeta, loadAllMeta } from '$lib/stores/meta.js';
   import LoadingSpinner from '$lib/components/shared/LoadingSpinner.svelte';
 
   let stats = $state<DashboardStats | null>(null);
+  let toolTiming = $state<ToolTiming[]>([]);
   let loading = $state(true);
+
+  // Budget settings
+  let budgets = $state<CostBudget>({});
+  let budgetEditing = $state(false);
+  let budgetDaily = $state('');
+  let budgetWeekly = $state('');
+  let budgetMonthly = $state('');
+  let savingBudgets = $state(false);
 
   onMount(async () => {
     try {
-      stats = await api.getStats();
+      [stats, toolTiming, budgets] = await Promise.all([
+        api.getStats(),
+        api.getToolTiming().catch(() => []),
+        api.getBudgets().catch(() => ({})),
+      ]);
+      budgetDaily = budgets.daily ? String(budgets.daily) : '';
+      budgetWeekly = budgets.weekly ? String(budgets.weekly) : '';
+      budgetMonthly = budgets.monthly ? String(budgets.monthly) : '';
     } catch (e) {
       console.error(e);
     } finally {
       loading = false;
     }
   });
+
+  async function saveBudgets() {
+    savingBudgets = true;
+    try {
+      budgets = await api.updateBudgets({
+        daily: budgetDaily ? Number(budgetDaily) : undefined,
+        weekly: budgetWeekly ? Number(budgetWeekly) : undefined,
+        monthly: budgetMonthly ? Number(budgetMonthly) : undefined,
+      });
+      budgetEditing = false;
+    } finally {
+      savingBudgets = false;
+    }
+  }
+
+  const maxToolMs = $derived(Math.max(...toolTiming.map((t) => t.avgMs), 1));
+
+  function fmtMs(ms: number): string {
+    if (ms >= 60_000) return `${(ms / 60_000).toFixed(1)}m`;
+    if (ms >= 1_000) return `${(ms / 1_000).toFixed(1)}s`;
+    return `${Math.round(ms)}ms`;
+  }
 </script>
 
 <div class="space-y-6">
@@ -97,6 +136,33 @@
       </div>
     </div>
 
+    <!-- Tool Timing -->
+    {#if toolTiming.length > 0}
+      <div class="bg-gray-900 border border-gray-800 rounded-xl p-4">
+        <h2 class="text-sm font-semibold text-gray-300 mb-4">Tool Performance (avg response time)</h2>
+        <div class="space-y-2.5">
+          {#each toolTiming.sort((a, b) => b.avgMs - a.avgMs) as t}
+            <div class="flex items-center gap-3">
+              <div class="w-32 shrink-0 text-xs font-mono text-gray-400 truncate text-right">{t.toolName}</div>
+              <div class="flex-1 h-5 bg-gray-800 rounded overflow-hidden">
+                <div
+                  class="h-full bg-teal-600/70 rounded transition-all"
+                  style:width="{(t.avgMs / maxToolMs) * 100}%"
+                ></div>
+              </div>
+              <div class="w-20 shrink-0 text-right space-x-2">
+                <span class="text-xs text-teal-400">{fmtMs(t.avgMs)}</span>
+                <span class="text-xs text-gray-600">avg</span>
+              </div>
+              <div class="w-16 shrink-0 text-right">
+                <span class="text-xs text-gray-600">{t.count}×</span>
+              </div>
+            </div>
+          {/each}
+        </div>
+      </div>
+    {/if}
+
     <!-- Summary stats -->
     <div class="bg-gray-900 border border-gray-800 rounded-xl p-4">
       <h2 class="text-sm font-semibold text-gray-300 mb-3">Summary</h2>
@@ -122,6 +188,72 @@
           <dd class="text-white font-bold text-lg">{stats.modelUsage.length}</dd>
         </div>
       </dl>
+    </div>
+
+    <!-- Cost Budgets -->
+    <div class="bg-gray-900 border border-gray-800 rounded-xl p-4">
+      <div class="flex items-center justify-between mb-4">
+        <h2 class="text-sm font-semibold text-gray-300">Cost Budgets</h2>
+        <button
+          onclick={() => (budgetEditing = !budgetEditing)}
+          class="text-xs px-2 py-1 bg-gray-800 border border-gray-700 rounded text-gray-400 hover:text-gray-200 hover:bg-gray-700"
+        >
+          {budgetEditing ? 'Cancel' : 'Edit'}
+        </button>
+      </div>
+
+      {#if budgetEditing}
+        <div class="grid grid-cols-3 gap-3">
+          {#each [
+            { label: 'Daily ($)', bind: budgetDaily, key: 'daily' },
+            { label: 'Weekly ($)', bind: budgetWeekly, key: 'weekly' },
+            { label: 'Monthly ($)', bind: budgetMonthly, key: 'monthly' },
+          ] as field}
+            <div>
+              <label class="block text-xs text-gray-500 mb-1">{field.label}</label>
+              {#if field.key === 'daily'}
+                <input type="number" min="0" step="0.01" bind:value={budgetDaily}
+                  class="w-full bg-gray-800 border border-gray-700 rounded px-3 py-1.5 text-sm text-gray-200 focus:outline-none focus:border-blue-500" />
+              {:else if field.key === 'weekly'}
+                <input type="number" min="0" step="0.01" bind:value={budgetWeekly}
+                  class="w-full bg-gray-800 border border-gray-700 rounded px-3 py-1.5 text-sm text-gray-200 focus:outline-none focus:border-blue-500" />
+              {:else}
+                <input type="number" min="0" step="0.01" bind:value={budgetMonthly}
+                  class="w-full bg-gray-800 border border-gray-700 rounded px-3 py-1.5 text-sm text-gray-200 focus:outline-none focus:border-blue-500" />
+              {/if}
+            </div>
+          {/each}
+        </div>
+        <button
+          onclick={saveBudgets}
+          disabled={savingBudgets}
+          class="mt-3 px-4 py-1.5 bg-blue-600 text-white rounded text-xs hover:bg-blue-500 disabled:opacity-50"
+        >
+          {savingBudgets ? 'Saving…' : 'Save Budgets'}
+        </button>
+      {:else}
+        <div class="grid grid-cols-3 gap-4 text-sm">
+          {#each [
+            { label: 'Daily', value: budgets.daily },
+            { label: 'Weekly', value: budgets.weekly },
+            { label: 'Monthly', value: budgets.monthly },
+          ] as b}
+            <div class="bg-gray-800/50 rounded-lg px-3 py-2">
+              <div class="text-xs text-gray-600">{b.label}</div>
+              <div class="text-white font-medium mt-0.5">
+                {#if b.value}
+                  ${b.value.toFixed(2)}
+                {:else}
+                  <span class="text-gray-600 text-xs">not set</span>
+                {/if}
+              </div>
+            </div>
+          {/each}
+        </div>
+        {#if !budgets.daily && !budgets.weekly && !budgets.monthly}
+          <p class="text-xs text-gray-600 mt-2">Set budget thresholds to see alerts on the dashboard.</p>
+        {/if}
+      {/if}
     </div>
   {:else}
     <div class="text-gray-500">Failed to load analytics data</div>

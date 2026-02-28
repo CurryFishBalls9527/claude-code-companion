@@ -1,17 +1,25 @@
 # Claude Code Companion Dashboard
 
-A local web dashboard that runs alongside [Claude Code](https://claude.ai/claude-code), giving you a rich UI for browsing sessions, reviewing file diffs, monitoring live activity, and analyzing usage stats — all powered by Claude Code's local data files in `~/.claude/`.
+A local dashboard that runs alongside [Claude Code](https://claude.ai/claude-code), giving you a rich UI for browsing sessions, reviewing diffs, monitoring live activity, and analyzing usage — all powered by Claude Code's local data files in `~/.claude/`.
 
-![Dashboard Screenshot](static/screenshot-placeholder.png)
+Runs as a **web app** (browser) or a **native desktop app** (Tauri v2).
 
 ## Features
 
-- **Session Browser** — Browse all past Claude Code sessions with full conversation replay, collapsible thinking blocks, and expandable tool call details
-- **Diff Review** — See every file Edit and Write operation as a syntax-highlighted unified or side-by-side diff
-- **Live Monitor** — Watch the current Claude Code session stream in real-time via WebSocket
-- **Usage Analytics** — Activity heatmap, token usage over time, cost estimates, model breakdown
-- **Search** — Full-text search across all sessions (prompts, responses, tool calls)
-- **Dashboard** — Stats overview with 52-week activity heatmap and per-model cost tracking
+| Feature | Description |
+|---------|-------------|
+| **Session Browser** | Browse all past sessions with conversation replay, collapsible thinking blocks, tool call details |
+| **Bookmarks, Tags & Notes** | Bookmark sessions, add searchable tags, and write persistent notes per session |
+| **Export** | Export any session as Markdown or JSON |
+| **Diff Review** | Every Edit/Write operation as syntax-highlighted unified or side-by-side diff |
+| **File Timeline** | Full edit history for any file across all sessions |
+| **Live Monitor** | Watch the current Claude Code session stream in real-time via WebSocket |
+| **Analytics** | Activity heatmap, token usage over time, cost estimates by model, tool timing |
+| **Cost Budgets** | Set daily/weekly/monthly spend limits — alerts appear on the dashboard when exceeded |
+| **Search** | Full-text search across all sessions (prompts, responses, tool calls) |
+| **Command Palette** | `⌘K` to jump anywhere or search sessions |
+| **Theme** | Dark / light mode toggle |
+| **Desktop App** | Native macOS/Windows/Linux app via Tauri v2 with system tray |
 
 ## How it works
 
@@ -23,6 +31,7 @@ Claude Code stores all conversation data locally in `~/.claude/projects/<project
   projects/
     <project-hash>/
       <sessionId>.jsonl      # Full conversation logs (JSONL)
+  dashboard-meta.json        # Bookmarks, tags, notes, budgets (written by this app)
 ```
 
 ## Tech Stack
@@ -31,39 +40,54 @@ Claude Code stores all conversation data locally in `~/.claude/projects/<project
 |-------|------|
 | Backend | Node.js, Express, WebSocket (`ws`), chokidar |
 | Frontend | SvelteKit 5, Svelte 5, Tailwind CSS v4 |
+| Desktop | Tauri v2 (Rust), system tray, minimize-to-tray |
 | Diffs | diff2html, `diff` npm package |
-| Charts | Chart.js |
-| Syntax highlighting | Shiki (`github-dark` theme) |
+| Syntax highlighting | Shiki |
 | Markdown | marked + DOMPurify |
+| Tests | Vitest (backend: node env, frontend: happy-dom) |
 
 ## Getting Started
 
 ### Prerequisites
 
 - Node.js 18+
-- Claude Code installed and at least one session recorded
+- Claude Code installed with at least one session recorded
 
-### Install & Run
+### Web App
 
 ```bash
-git clone https://github.com/your-username/claude-dashboard.git
+git clone https://github.com/mushyrocket/claude-dashboard.git
 cd claude-dashboard
 npm install
 npm run dev
 ```
 
-Then open **http://localhost:5173** in your browser.
+Open **http://localhost:5173** in your browser.
 
-The backend API runs on port `3456`, the frontend on `5173`. Vite proxies `/api` and `/ws` automatically during development.
+The backend API runs on port `3456`, the frontend dev server on `5173`. Vite proxies `/api` and `/ws` automatically in dev mode.
+
+### Desktop App (Tauri)
+
+Additional prerequisites: [Rust](https://rustup.rs/) + Xcode Command Line Tools (macOS).
+
+```bash
+npm run tauri:dev      # development
+npm run tauri:build    # production bundle
+```
+
+The desktop app auto-starts the Node.js backend on launch and adds a system tray icon. Click the tray icon to show/hide the window; closing the window minimises to tray.
 
 ### Scripts
 
 | Command | Description |
 |---------|-------------|
-| `npm run dev` | Start both backend + frontend in development mode |
-| `npm run dev:backend` | Backend only (tsx watch) |
+| `npm run dev` | Start backend + frontend (web mode) |
+| `npm run dev:backend` | Backend only (`tsx` watch) |
 | `npm run dev:frontend` | Frontend only (Vite dev server) |
 | `npm run build` | Production build |
+| `npm run tauri:dev` | Desktop app in dev mode |
+| `npm run tauri:build` | Package native desktop app |
+| `npm test` | Run all unit tests |
 
 ## Project Structure
 
@@ -71,41 +95,51 @@ The backend API runs on port `3456`, the frontend on `5173`. Vite proxies `/api`
 claude-dashboard/
   src/
     shared/
-      types.ts          # TypeScript interfaces shared between BE and FE
-      constants.ts      # ~/.claude paths, model pricing
+      types.ts            # TypeScript interfaces (backend + frontend)
+      constants.ts        # ~/.claude paths, model pricing
     backend/
-      server.ts         # Express + WebSocket server (port 3456)
-      routes/           # API route handlers
+      server.ts           # Express + WebSocket server (port 3456)
+      routes/             # sessions, diffs, stats, search, meta, files, live
       services/
-        claude-data.ts      # Discovers projects/sessions
+        claude-data.ts      # Project/session discovery
         session-parser.ts   # JSONL → ProcessedMessage[]
-        diff-extractor.ts   # Edit/Write tool calls → unified diffs
-        stats-service.ts    # Aggregates usage stats
+        diff-extractor.ts   # Edit/Write → unified diffs
+        stats-service.ts    # Usage aggregation + top files + tool timing
+        session-meta.ts     # Bookmarks, tags, notes, budgets (dashboard-meta.json)
         search-index.ts     # Full-text search
         file-watcher.ts     # chokidar live session watching
-        cache.ts            # LRU cache for parsed sessions
+        cache.ts            # LRU cache with mtime invalidation
       utils/
-        jsonl-reader.ts     # Streaming JSONL reader + tail for live mode
-        cost-calculator.ts  # Token → USD cost conversion
-    lib/                # SvelteKit frontend
+        jsonl-reader.ts     # Streaming JSONL reader
+        cost-calculator.ts  # Token → USD conversion
+        session-export.ts   # Session → Markdown / JSON
+    lib/
       api/
-        client.ts       # Typed fetch wrapper (swap point for Tauri)
-        websocket.ts    # WebSocket client with auto-reconnect
-      stores/           # Svelte stores
+        client.ts         # Typed fetch wrapper (auto-detects Tauri context)
+        websocket.ts      # WebSocket client with auto-reconnect
+      stores/
+        meta.ts           # Bookmark/tag/note state
+        theme.ts          # Dark/light theme with localStorage
       components/
-        session/        # MessageCard, ToolCallCard, ThinkingBlock
-        diff/           # DiffViewer
-        dashboard/      # ActivityHeatmap, TokenChart, ModelBreakdown
-        shared/         # CodeBlock (Shiki), MarkdownRenderer, Badge, etc.
-    routes/             # SvelteKit pages
-      +page.svelte               # Dashboard home
-      sessions/+page.svelte      # Session list
-      sessions/[id]/+page.svelte # Session detail + replay
-      diffs/+page.svelte         # Diff list
-      diffs/[sessionId]/+page.svelte # Per-session diffs
-      analytics/+page.svelte     # Usage analytics
-      live/+page.svelte          # Live session monitor
-      search/+page.svelte        # Search results
+        session/          # MessageCard, ToolCallCard, ThinkingBlock, BookmarkButton
+        diff/             # DiffViewer (unified + split toggle)
+        dashboard/        # ActivityHeatmap, TokenChart, ModelBreakdown
+        shared/           # CommandPalette, BackendStatus, CodeBlock, Badge, …
+    routes/
+      +page.svelte                    # Dashboard (stats + budget alerts)
+      sessions/+page.svelte           # Session list (filter, bookmark, tags)
+      sessions/[id]/+page.svelte      # Session detail (replay, export, notes)
+      diffs/+page.svelte              # All diffs
+      diffs/[sessionId]/+page.svelte  # Per-session diffs
+      analytics/+page.svelte          # Analytics + tool timing + budgets
+      files/+page.svelte              # Top edited files
+      files/timeline/+page.svelte     # Per-file edit history
+      live/+page.svelte               # Live session monitor
+      search/+page.svelte             # Full-text search
+  src-tauri/                          # Tauri v2 Rust app
+    src/lib.rs                        # System tray, backend spawn, window management
+    tauri.conf.json                   # App config (1280×800, tray icon)
+    Cargo.toml                        # tauri, tauri-plugin-shell, tauri-plugin-log
 ```
 
 ## API Reference
@@ -113,48 +147,34 @@ claude-dashboard/
 | Endpoint | Description |
 |----------|-------------|
 | `GET /api/projects` | List all Claude Code projects |
-| `GET /api/sessions` | Paginated session list (filter by project, sort by date/tokens/messages) |
-| `GET /api/sessions/:id` | Full session detail with all messages |
-| `GET /api/sessions/:id/diffs` | File diffs extracted from Edit/Write tool calls |
-| `GET /api/history` | Global prompt history from `history.jsonl` |
+| `GET /api/sessions` | Paginated session list |
+| `GET /api/sessions/:id` | Full session detail |
+| `GET /api/sessions/:id/diffs` | File diffs for a session |
+| `GET /api/sessions/:id/export?format=json\|markdown` | Export session |
+| `GET /api/history` | Global prompt history |
 | `GET /api/stats` | Aggregated usage stats |
 | `GET /api/stats/top-files` | Most frequently edited files |
-| `GET /api/stats/tool-usage` | Tool call frequency breakdown |
-| `GET /api/search?q=` | Full-text search across all sessions |
+| `GET /api/stats/tool-usage` | Tool call frequency |
+| `GET /api/stats/tool-timing` | Avg/max response time per tool |
+| `GET /api/search?q=` | Full-text search |
 | `GET /api/live/active` | Most recently active session ID |
-| `WS /ws` | WebSocket for live session streaming |
+| `GET /api/meta` | All session metadata (bookmarks, tags, notes) |
+| `PUT /api/meta/:id` | Update session metadata |
+| `GET /api/meta/budgets/current` | Cost budget thresholds |
+| `PUT /api/meta/budgets/current` | Update budget thresholds |
+| `GET /api/files/timeline?path=` | Edit history for a specific file |
+| `WS  /ws` | WebSocket for live session streaming |
 
-## Usage alongside Claude Code
+## Usage tip
 
-Run the dashboard in the background while you use Claude Code normally:
+Run in the background while you use Claude Code normally:
 
 ```bash
-# Add to ~/.zshrc for convenience
-alias dashboard='cd ~/path/to/claude-dashboard && npm run dev &'
+# Add to ~/.zshrc
+alias dashboard='cd ~/code/claude-dashboard && npm run dev > /dev/null 2>&1 &'
 ```
 
-Or use iTerm2's split pane (`Cmd+D`) to keep the browser open alongside your terminal.
-
-### Live Monitor
-
-The `/live` page auto-detects the most recently modified session file and streams new messages via WebSocket as Claude responds. Refresh the page to pick up a new session.
-
-## Roadmap
-
-- [ ] **v2: Native desktop app** — Tauri migration (frontend is already adapter-static, ready to embed)
-- [ ] **Top files** — Full per-file edit history across sessions
-- [ ] **Session comparison** — Diff two sessions side by side
-- [ ] **Cost alerts** — Notify when daily spend exceeds a threshold
-- [ ] **Export** — Export sessions as Markdown or JSON
-
-## V2 Desktop Migration
-
-The architecture is designed for a clean migration to a native app:
-
-1. **Frontend is portable** — `adapter-static` produces pure static files embeddable in Tauri/Electron
-2. **Single API swap point** — `src/lib/api/client.ts` replaces `fetch()` with `invoke()` from `@tauri-apps/api`
-3. **WebSocket → Tauri events** — `src/lib/api/websocket.ts` swaps to `@tauri-apps/api/event`
-4. **Backend → Rust** — Node.js services map 1:1 to Rust modules (session_parser, file_watcher with `notify` crate, etc.)
+Or open the desktop app (`npm run tauri:build`) so it lives in your system tray.
 
 ## License
 

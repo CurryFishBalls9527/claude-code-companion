@@ -3,6 +3,18 @@
   import { page } from '$app/stores';
   import { goto } from '$app/navigation';
   import type { Snippet } from 'svelte';
+  import BackendStatus from '$lib/components/shared/BackendStatus.svelte';
+  import { theme } from '$lib/stores/theme.js';
+  import CommandPalette from '$lib/components/shared/CommandPalette.svelte';
+
+  let paletteOpen = $state(false);
+
+  function handleGlobalKey(e: KeyboardEvent) {
+    if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
+      e.preventDefault();
+      paletteOpen = !paletteOpen;
+    }
+  }
 
   let { children }: { children: Snippet } = $props();
 
@@ -29,6 +41,9 @@
   }
 </script>
 
+<svelte:window onkeydown={handleGlobalKey} />
+<CommandPalette bind:open={paletteOpen} />
+
 <div class="flex h-screen bg-gray-950 text-gray-100 overflow-hidden">
   <!-- Sidebar -->
   <nav class="w-52 bg-gray-900 border-r border-gray-800 flex flex-col shrink-0">
@@ -37,7 +52,7 @@
       <div class="text-xs text-gray-500 mt-0.5">Code companion</div>
     </div>
 
-    <div class="flex-1 py-3 px-2 space-y-0.5">
+    <div class="flex-1 py-3 px-2 space-y-0.5 overflow-auto">
       {#each navItems as item}
         <a
           href={item.href}
@@ -52,23 +67,41 @@
         </a>
       {/each}
     </div>
+    <!-- Theme toggle at bottom of sidebar -->
+    <div class="p-3 border-t border-gray-800 shrink-0">
+      <button
+        onclick={() => theme.toggle()}
+        class="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-xs text-gray-500 hover:text-gray-300 hover:bg-gray-800 transition-colors"
+      >
+        {#if $theme === 'dark'}
+          <svg class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z" />
+          </svg>
+          Light mode
+        {:else}
+          <svg class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z" />
+          </svg>
+          Dark mode
+        {/if}
+      </button>
+    </div>
   </nav>
 
   <!-- Main content -->
   <div class="flex-1 flex flex-col overflow-hidden">
+    <BackendStatus />
     <header class="bg-gray-900 border-b border-gray-800 px-5 py-3 flex items-center gap-3 shrink-0">
-      <div class="relative flex-1 max-w-lg">
-        <svg class="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+      <button
+        onclick={() => (paletteOpen = true)}
+        class="flex items-center gap-2 flex-1 max-w-lg bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-500 hover:border-gray-600 transition-colors"
+      >
+        <svg class="h-4 w-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
         </svg>
-        <input
-          type="search"
-          placeholder="Search sessions... (Enter)"
-          bind:value={searchValue}
-          onkeydown={handleSearch}
-          class="w-full bg-gray-800 border border-gray-700 rounded-lg pl-9 pr-4 py-2 text-sm text-gray-200 placeholder-gray-500 focus:outline-none focus:border-blue-500"
-        />
-      </div>
+        <span class="flex-1 text-left">Search commands or sessions...</span>
+        <kbd class="text-xs bg-gray-700 border border-gray-600 rounded px-1.5 py-0.5 shrink-0">⌘K</kbd>
+      </button>
     </header>
 
     <main class="flex-1 overflow-auto p-5">

@@ -53,6 +53,7 @@ export interface RawSessionEntry {
   // summary entries
   summary?: string;
   isSidechain?: boolean;
+  isMeta?: boolean;
   requestId?: string;
 }
 
@@ -191,6 +192,53 @@ export interface ProjectInfo {
   path: string;
   sessionCount: number;
   lastActivity?: string;
+}
+
+// ─── Meta / Bookmark Types ────────────────────────────────────────────────────
+
+export interface SessionMeta {
+  sessionId: string;
+  bookmarked: boolean;
+  tags: string[];
+  notes: string;
+  updatedAt: string;
+}
+
+export interface CostBudget {
+  daily?: number;
+  weekly?: number;
+  monthly?: number;
+}
+
+export interface DashboardMeta {
+  sessions: Record<string, SessionMeta>;
+  budgets: CostBudget;
+}
+
+// ─── Export Types ─────────────────────────────────────────────────────────────
+
+export type ExportFormat = 'json' | 'markdown';
+
+// ─── Tool Timing Types ────────────────────────────────────────────────────────
+
+export interface ToolTiming {
+  toolName: string;
+  avgMs: number;
+  maxMs: number;
+  count: number;
+  totalMs: number;
+}
+
+// ─── File Timeline Types ──────────────────────────────────────────────────────
+
+export interface FileEdit {
+  sessionId: string;
+  projectName: string;
+  timestamp: string;
+  toolName: 'Edit' | 'Write';
+  unifiedDiff: string;
+  linesAdded: number;
+  linesRemoved: number;
 }
 
 // ─── WebSocket Message Types ──────────────────────────────────────────────────

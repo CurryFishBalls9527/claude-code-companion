@@ -61,9 +61,10 @@ interface EntryMatch {
   text: string;
 }
 
-function searchEntry(entry: Record<string, unknown>, q: string): EntryMatch | null {
-  const type = entry.type as string;
-  const message = entry.message as { role?: string; content?: string | ContentBlock[] } | undefined;
+function searchEntry(entry: object, q: string): EntryMatch | null {
+  const e = entry as Record<string, unknown>;
+  const type = e.type as string;
+  const message = e.message as { role?: string; content?: string | ContentBlock[] } | undefined;
 
   if (type === 'user' && message?.role === 'user') {
     const content = message.content;

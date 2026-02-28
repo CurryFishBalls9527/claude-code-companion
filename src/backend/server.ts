@@ -6,6 +6,8 @@ import { sessionsRouter } from './routes/sessions.js';
 import { historyRouter } from './routes/history.js';
 import { statsRouter } from './routes/stats.js';
 import { searchRouter } from './routes/search.js';
+import { metaRouter } from './routes/meta.js';
+import { filesRouter } from './routes/files.js';
 import { startFileWatcher, subscribeToSession, findMostRecentSessionFile } from './services/file-watcher.js';
 import { findSessionById } from './services/claude-data.js';
 import { BACKEND_PORT } from '../shared/constants.js';
@@ -34,6 +36,8 @@ app.use('/api/sessions', sessionsRouter);
 app.use('/api/history', historyRouter);
 app.use('/api/stats', statsRouter);
 app.use('/api/search', searchRouter);
+app.use('/api/meta', metaRouter);
+app.use('/api/files', filesRouter);
 
 // Active session endpoint (for live monitor)
 app.get('/api/live/active', async (req, res) => {

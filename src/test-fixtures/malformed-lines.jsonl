@@ -1,0 +1,5 @@
+{"type":"user","uuid":"uuid-m1","parentUuid":null,"sessionId":"test-malformed","timestamp":"2024-01-15T10:00:00.000Z","message":{"role":"user","content":"valid line"}}
+{this is not valid json
+{"type":"assistant","uuid":"uuid-m2","parentUuid":"uuid-m1","sessionId":"test-malformed","timestamp":"2024-01-15T10:00:05.000Z","message":{"role":"assistant","content":[{"type":"text","text":"valid response"}],"model":"claude-sonnet-4-5","usage":{"input_tokens":10,"output_tokens":5}}}
+
+{"type":"user","uuid":"uuid-m3","parentUuid":"uuid-m2","sessionId":"test-malformed","timestamp":"2024-01-15T10:00:10.000Z","message":{"role":"user","content":"another valid line"}}

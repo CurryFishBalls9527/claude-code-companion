@@ -2,7 +2,7 @@
   import { onMount, onDestroy } from 'svelte';
   import { api } from '$lib/api/client.js';
   import { getWsClient } from '$lib/api/websocket.js';
-  import type { SessionDetail, ProcessedMessage } from '$shared/types.js';
+  import type { SessionDetail, ProcessedMessage, ContentBlock, RawSessionEntry } from '$shared/types.js';
   import MessageCard from '$lib/components/session/MessageCard.svelte';
   import LoadingSpinner from '$lib/components/shared/LoadingSpinner.svelte';
 
@@ -15,6 +15,44 @@
   let messagesDiv: HTMLElement;
 
   let unsubscribe: (() => void) | null = null;
+
+  function parseEntry(e: RawSessionEntry): ProcessedMessage[] {
+    if (e.type === 'user') {
+      const msg = e.message as { role: string; content: string | ContentBlock[] } | undefined;
+      if (!msg) return [];
+      // @ts-ignore
+      if (e.isMeta) return [];
+      const content = msg.content;
+      let userText = '';
+      if (typeof content === 'string') {
+        userText = content;
+      } else if (Array.isArray(content)) {
+        userText = content.filter((b) => b.type === 'text').map((b) => b.text ?? '').join('\n');
+      }
+      if (!userText || userText.startsWith('<local-command') || userText.startsWith('<command-name>')) return [];
+      return [{ uuid: e.uuid, parentUuid: e.parentUuid, timestamp: e.timestamp, role: 'user', userText }];
+    }
+
+    if (e.type === 'assistant') {
+      const msg = e.message as { role: string; content: ContentBlock[]; model?: string } | undefined;
+      if (!msg) return [];
+      let thinking: string | undefined;
+      let text: string | undefined;
+      const toolCalls = [];
+      for (const block of msg.content ?? []) {
+        if (block.type === 'thinking') thinking = block.thinking ?? block.text ?? '';
+        else if (block.type === 'text') text = (text ?? '') + (block.text ?? '');
+        else if (block.type === 'tool_use') {
+          toolCalls.push({ id: block.id ?? '', name: block.name ?? '', input: (block.input ?? {}) as Record<string, unknown> });
+        }
+      }
+      return [{ uuid: e.uuid, parentUuid: e.parentUuid, timestamp: e.timestamp, role: 'assistant',
+        thinking: thinking?.trim() || undefined, text: text?.trim() || undefined,
+        toolCalls: toolCalls.length ? toolCalls : undefined, model: msg.model }];
+    }
+
+    return [];
+  }
 
   onMount(async () => {
     try {
@@ -33,17 +71,7 @@
       const ws = getWsClient();
       unsubscribe = ws.subscribe(activeId, (entries) => {
         connected = true;
-        // Parse new entries and add as messages (simplified - just show raw)
-        const newMsgs: ProcessedMessage[] = entries
-          .filter((e) => e.type === 'assistant' || e.type === 'user')
-          .map((e) => ({
-            uuid: e.uuid,
-            parentUuid: e.parentUuid,
-            timestamp: e.timestamp,
-            role: e.type as 'user' | 'assistant',
-            userText: e.type === 'user' ? '[new message]' : undefined,
-            text: e.type === 'assistant' ? '[new response]' : undefined,
-          }));
+        const newMsgs: ProcessedMessage[] = entries.flatMap((e) => parseEntry(e));
 
         if (newMsgs.length > 0) {
           messages = [...messages, ...newMsgs];

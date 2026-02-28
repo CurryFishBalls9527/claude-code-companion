@@ -1,9 +1,9 @@
 import { readFile } from 'fs/promises';
-import { STATS_CACHE_FILE, MODEL_PRICING } from '../../shared/constants.js';
+import { STATS_CACHE_FILE } from '../../shared/constants.js';
 import { discoverProjects, discoverSessions, getSessionPath } from './claude-data.js';
-import { parseSessionSummary } from './session-parser.js';
+import { parseSessionSummary, parseSessionDetail } from './session-parser.js';
 import { calculateCost } from '../utils/cost-calculator.js';
-import type { DashboardStats, DailyActivity, ModelUsage, TopFile, ToolUsageStat, SessionSummary } from '../../shared/types.js';
+import type { DashboardStats, DailyActivity, ModelUsage, TopFile, ToolUsageStat, SessionSummary, ToolTiming } from '../../shared/types.js';
 
 interface StatsCacheFile {
   dailyActivity?: Array<{ date: string; messageCount?: number; tokensUsed?: number }>;
@@ -156,20 +156,45 @@ function buildHourCounts(summaries: SessionSummary[]): number[] {
 
 /**
  * Get the most frequently modified files across all sessions.
+ * Reads full session details to extract Edit/Write tool call file paths.
  */
 export async function getTopFiles(limit = 20): Promise<TopFile[]> {
-  const summaries = await computeStatsFromSessions();
-  // We'll need to look at session details for file data
-  // For now return session-level edit counts as proxy
-  // Full implementation reads diffs from parseSessionDetail
+  const projects = await discoverProjects();
   const fileMap = new Map<string, { editCount: number; sessions: Set<string>; lastModified: string }>();
 
-  // This would need full session details - simplified for now
-  // Real implementation in Phase 4 route handler
+  for (const project of projects) {
+    const sessions = await discoverSessions(project.hash);
+    for (const sessionFile of sessions) {
+      try {
+        const filePath = getSessionPath(project.hash, sessionFile);
+        const detail = await parseSessionDetail(filePath);
+
+        for (const msg of detail.messages) {
+          for (const tc of msg.toolCalls ?? []) {
+            if (tc.name !== 'Edit' && tc.name !== 'Write') continue;
+            const fp = String(tc.input.file_path ?? '');
+            if (!fp) continue;
+
+            if (!fileMap.has(fp)) {
+              fileMap.set(fp, { editCount: 0, sessions: new Set(), lastModified: msg.timestamp });
+            }
+            const entry = fileMap.get(fp)!;
+            entry.editCount++;
+            entry.sessions.add(detail.id);
+            if (msg.timestamp > entry.lastModified) {
+              entry.lastModified = msg.timestamp;
+            }
+          }
+        }
+      } catch {
+        // Skip unreadable sessions
+      }
+    }
+  }
 
   return Array.from(fileMap.entries())
-    .map(([filePath, data]) => ({
-      filePath,
+    .map(([fp, data]) => ({
+      filePath: fp,
       editCount: data.editCount,
       sessionCount: data.sessions.size,
       lastModified: data.lastModified,
@@ -179,16 +204,93 @@ export async function getTopFiles(limit = 20): Promise<TopFile[]> {
 }
 
 /**
- * Get tool usage statistics.
+ * Get tool usage statistics broken down by actual tool name.
  */
 export async function getToolUsage(): Promise<ToolUsageStat[]> {
-  const summaries = await computeStatsFromSessions();
-  const total = summaries.reduce((s, m) => s + m.toolCallCount, 0);
-  const editTotal = summaries.reduce((s, m) => s + m.editCount, 0);
-  // More granular stats would need full session details
-  const stats: ToolUsageStat[] = [
-    { toolName: 'Edit', count: editTotal, percentage: total > 0 ? (editTotal / total) * 100 : 0 },
-    { toolName: 'Other', count: total - editTotal, percentage: total > 0 ? ((total - editTotal) / total) * 100 : 0 },
-  ];
-  return stats.filter((s) => s.count > 0);
+  const projects = await discoverProjects();
+  const toolCounts = new Map<string, number>();
+
+  for (const project of projects) {
+    const sessions = await discoverSessions(project.hash);
+    for (const sessionFile of sessions) {
+      try {
+        const filePath = getSessionPath(project.hash, sessionFile);
+        const detail = await parseSessionDetail(filePath);
+        for (const msg of detail.messages) {
+          for (const tc of msg.toolCalls ?? []) {
+            toolCounts.set(tc.name, (toolCounts.get(tc.name) ?? 0) + 1);
+          }
+        }
+      } catch {
+        // Skip unreadable sessions
+      }
+    }
+  }
+
+  const total = Array.from(toolCounts.values()).reduce((s, n) => s + n, 0);
+  return Array.from(toolCounts.entries())
+    .map(([toolName, count]) => ({
+      toolName,
+      count,
+      percentage: total > 0 ? (count / total) * 100 : 0,
+    }))
+    .sort((a, b) => b.count - a.count);
+}
+
+/**
+ * Compute average and max tool call durations from consecutive timestamps.
+ * Duration = time between assistant message with tool_use and next user message with tool_result.
+ */
+export async function getToolTiming(sessionId?: string): Promise<ToolTiming[]> {
+  const { findSessionById } = await import('./claude-data.js');
+  const projects = sessionId ? [] : await discoverProjects();
+  const timings = new Map<string, { total: number; max: number; count: number }>();
+
+  async function processDetail(filePath: string) {
+    const detail = await parseSessionDetail(filePath);
+    const msgs = detail.messages;
+
+    for (let i = 0; i < msgs.length; i++) {
+      const msg = msgs[i];
+      if (msg.role !== 'assistant' || !msg.toolCalls?.length) continue;
+
+      const nextMsg = msgs[i + 1];
+      if (!nextMsg) continue;
+
+      const startMs = new Date(msg.timestamp).getTime();
+      const endMs = new Date(nextMsg.timestamp).getTime();
+      const durationMs = endMs - startMs;
+      if (durationMs < 0 || durationMs > 300_000) continue; // sanity: ignore >5min gaps
+
+      for (const tc of msg.toolCalls) {
+        const entry = timings.get(tc.name) ?? { total: 0, max: 0, count: 0 };
+        entry.total += durationMs;
+        entry.max = Math.max(entry.max, durationMs);
+        entry.count++;
+        timings.set(tc.name, entry);
+      }
+    }
+  }
+
+  if (sessionId) {
+    const found = await findSessionById(sessionId);
+    if (found) await processDetail(found.filePath).catch(() => {});
+  } else {
+    for (const project of projects) {
+      const sessions = await discoverSessions(project.hash);
+      for (const sf of sessions) {
+        await processDetail(getSessionPath(project.hash, sf)).catch(() => {});
+      }
+    }
+  }
+
+  return Array.from(timings.entries())
+    .map(([toolName, data]) => ({
+      toolName,
+      avgMs: Math.round(data.total / data.count),
+      maxMs: data.max,
+      count: data.count,
+      totalMs: data.total,
+    }))
+    .sort((a, b) => b.avgMs - a.avgMs);
 }

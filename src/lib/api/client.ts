@@ -8,12 +8,33 @@ import type {
   SearchResult,
   TopFile,
   ToolUsageStat,
+  SessionMeta,
+  DashboardMeta,
+  CostBudget,
+  ToolTiming,
+  FileEdit,
 } from '$shared/types.js';
 
-const BASE = '/api';
+// In Tauri the frontend is served from a custom protocol (tauri://), so
+// relative /api paths won't reach the Express backend. Use the explicit port.
+const isTauri = typeof window !== 'undefined' && '__TAURI__' in window;
+const BASE = isTauri ? 'http://localhost:3456/api' : '/api';
 
 async function get<T>(path: string): Promise<T> {
   const res = await fetch(`${BASE}${path}`);
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error((err as { error: string }).error ?? `HTTP ${res.status}`);
+  }
+  return res.json() as Promise<T>;
+}
+
+async function put<T>(path: string, body: unknown): Promise<T> {
+  const res = await fetch(`${BASE}${path}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: res.statusText }));
     throw new Error((err as { error: string }).error ?? `HTTP ${res.status}`);
@@ -82,5 +103,39 @@ export const api = {
   // Live
   getActiveSession(): Promise<{ sessionId: string | null; filePath?: string }> {
     return get('/live/active');
+  },
+
+  // Session export
+  getExportUrl(id: string, format: 'json' | 'markdown'): string {
+    return `${BASE}/sessions/${encodeURIComponent(id)}/export?format=${format}`;
+  },
+
+  // Meta / bookmarks / tags / notes
+  getAllMeta(): Promise<DashboardMeta> {
+    return get('/meta');
+  },
+  getSessionMeta(id: string): Promise<SessionMeta> {
+    return get(`/meta/${encodeURIComponent(id)}`);
+  },
+  updateSessionMeta(id: string, patch: Partial<SessionMeta>): Promise<SessionMeta> {
+    return put(`/meta/${encodeURIComponent(id)}`, patch);
+  },
+
+  // Budgets
+  getBudgets(): Promise<CostBudget> {
+    return get('/meta/budgets/current');
+  },
+  updateBudgets(budgets: CostBudget): Promise<CostBudget> {
+    return put('/meta/budgets/current', budgets);
+  },
+
+  // Tool timing
+  getToolTiming(sessionId?: string): Promise<ToolTiming[]> {
+    return get(`/stats/tool-timing${sessionId ? `?sessionId=${encodeURIComponent(sessionId)}` : ''}`);
+  },
+
+  // File timeline
+  getFileTimeline(filePath: string): Promise<FileEdit[]> {
+    return get(`/files/timeline?path=${encodeURIComponent(filePath)}`);
   },
 };

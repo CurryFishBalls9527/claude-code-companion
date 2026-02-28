@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { api } from '$lib/api/client.js';
-  import type { DashboardStats, SessionSummary } from '$shared/types.js';
+  import type { DashboardStats, SessionSummary, CostBudget } from '$shared/types.js';
   import LoadingSpinner from '$lib/components/shared/LoadingSpinner.svelte';
   import ActivityHeatmap from '$lib/components/dashboard/ActivityHeatmap.svelte';
   import TokenChart from '$lib/components/dashboard/TokenChart.svelte';
@@ -10,13 +10,15 @@
 
   let stats = $state<DashboardStats | null>(null);
   let recentSessions = $state<SessionSummary[]>([]);
+  let budgets = $state<CostBudget>({});
   let loading = $state(true);
 
   onMount(async () => {
     try {
-      [stats, { sessions: recentSessions }] = await Promise.all([
+      [stats, { sessions: recentSessions }, budgets] = await Promise.all([
         api.getStats(),
         api.getSessions({ limit: 5, sort: 'date' }),
+        api.getBudgets().catch(() => ({})),
       ]);
     } catch (e) {
       console.error(e);
@@ -34,6 +36,36 @@
   function formatCost(n: number): string {
     return n < 0.01 ? '<$0.01' : `$${n.toFixed(2)}`;
   }
+
+  // Compute estimated spend for recent periods using avg cost/token
+  const budgetAlerts = $derived(() => {
+    if (!stats || !stats.totalTokens) return [];
+    const avgCostPerToken = stats.totalCost / stats.totalTokens;
+    const today = new Date().toISOString().slice(0, 10);
+    const msPerDay = 86_400_000;
+    const nowMs = Date.now();
+
+    const alerts: { label: string; spent: number; budget: number; pct: number }[] = [];
+
+    const tokensInRange = (days: number) =>
+      stats!.dailyActivity
+        .filter((d) => nowMs - new Date(d.date).getTime() < days * msPerDay)
+        .reduce((s, d) => s + d.tokenCount, 0);
+
+    if (budgets.daily) {
+      const spent = tokensInRange(1) * avgCostPerToken;
+      alerts.push({ label: 'Today', spent, budget: budgets.daily, pct: spent / budgets.daily });
+    }
+    if (budgets.weekly) {
+      const spent = tokensInRange(7) * avgCostPerToken;
+      alerts.push({ label: 'This week', spent, budget: budgets.weekly, pct: spent / budgets.weekly });
+    }
+    if (budgets.monthly) {
+      const spent = tokensInRange(30) * avgCostPerToken;
+      alerts.push({ label: 'This month', spent, budget: budgets.monthly, pct: spent / budgets.monthly });
+    }
+    return alerts.filter((a) => a.pct >= 0.7); // only show if ≥70% of budget used
+  });
 </script>
 
 <div class="space-y-6">
@@ -42,6 +74,20 @@
   {#if loading}
     <LoadingSpinner />
   {:else if stats}
+    <!-- Budget alerts -->
+    {#each budgetAlerts() as alert}
+      <div class="flex items-center gap-3 rounded-lg border px-4 py-3 text-sm {alert.pct >= 1 ? 'bg-red-900/20 border-red-700 text-red-300' : 'bg-yellow-900/20 border-yellow-700 text-yellow-300'}">
+        <svg class="h-4 w-4 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L3.07 16.5c-.77.833.192 2.5 1.732 2.5z" />
+        </svg>
+        <span>
+          <strong>{alert.label}:</strong> ${alert.spent.toFixed(2)} of ${alert.budget.toFixed(2)} budget used ({Math.round(alert.pct * 100)}%)
+          {#if alert.pct >= 1} — <strong>over budget!</strong>{/if}
+        </span>
+        <a href="/analytics" class="ml-auto text-xs underline opacity-70 hover:opacity-100 shrink-0">Manage</a>
+      </div>
+    {/each}
+
     <!-- Stats cards -->
     <div class="grid grid-cols-2 lg:grid-cols-4 gap-4">
       {#each [
