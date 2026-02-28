@@ -161,6 +161,12 @@
             {meta?.bookmarked ? 'Bookmarked' : 'Bookmark'}
           </button>
           <a
+            href="/chat?resume={session.id}"
+            class="px-3 py-1 bg-green-800/60 border border-green-700/60 rounded text-xs text-green-300 hover:bg-green-700/60"
+          >
+            Resume in Chat
+          </a>
+          <a
             href="/diffs/{session.id}"
             class="px-3 py-1 bg-gray-800 border border-gray-700 rounded text-xs hover:bg-gray-700"
           >

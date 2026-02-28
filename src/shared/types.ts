@@ -241,7 +241,7 @@ export interface FileEdit {
   linesRemoved: number;
 }
 
-// ─── WebSocket Message Types ──────────────────────────────────────────────────
+// ─── WebSocket Message Types (live session replay) ───────────────────────────
 
 export interface WsSubscribeMessage {
   type: 'subscribe';
@@ -256,3 +256,30 @@ export interface WsSessionUpdateMessage {
 
 export type WsClientMessage = WsSubscribeMessage;
 export type WsServerMessage = WsSessionUpdateMessage;
+
+// ─── Chat / PTY Stream Types ──────────────────────────────────────────────────
+
+/** Events emitted by `claude --output-format stream-json` */
+export type StreamEvent =
+  | { type: 'system'; subtype: 'init'; session_id: string; tools: string[]; model: string }
+  | { type: 'assistant'; subtype: 'thinking'; content_block_index: number; text: string }
+  | { type: 'assistant'; subtype: 'text'; content_block_index: number; text: string }
+  | { type: 'assistant'; subtype: 'tool_use'; content_block_index: number; id: string; name: string; input: Record<string, unknown> }
+  | { type: 'assistant'; subtype: 'input_json_delta'; content_block_index: number; partial_json: string }
+  | { type: 'result'; subtype: 'success'; session_id: string; usage: TokenUsage; model: string; cost_usd: number; duration_ms: number; num_turns: number }
+  | { type: 'result'; subtype: 'error'; error: string }
+  | { type: 'tool'; subtype: 'approval_request'; tool_name: string; tool_id: string; input: Record<string, unknown> }
+  | { type: 'tool'; subtype: 'result'; tool_id: string; output: string; is_error: boolean };
+
+// Client → server
+export interface ChatCreateMsg { type: 'chat-create'; projectPath: string; model?: string; resumeSessionId?: string; permissionMode?: string; }
+export interface ChatSendMsg   { type: 'chat-send';   sessionId: string; text: string; }
+export interface ChatApproveMsg{ type: 'chat-approve'; sessionId: string; toolId: string; approved: boolean; }
+export interface ChatEndMsg    { type: 'chat-end';    sessionId: string; }
+
+// Server → client
+export interface ChatCreatedMsg      { type: 'chat-created';          sessionId: string; }
+export interface ChatEventMsg        { type: 'chat-event';            sessionId: string; event: StreamEvent; }
+export interface PtyOutputMsg        { type: 'pty-output';            sessionId: string; data: string; }
+export interface ToolApprovalReqMsg  { type: 'tool-approval-request'; sessionId: string; toolId: string; toolName: string; input: Record<string, unknown>; }
+export interface ChatSessionEndMsg   { type: 'session-end';           sessionId: string; exitCode: number; }
