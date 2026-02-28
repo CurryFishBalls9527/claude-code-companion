@@ -1,10 +1,11 @@
-import * as pty from 'node-pty';
+import { spawn, type ChildProcessWithoutNullStreams } from 'child_process';
+import { existsSync } from 'fs';
 import { EventEmitter } from 'events';
 import { execSync } from 'child_process';
 
 export interface ChatSession {
   id: string;
-  ptyProcess: pty.IPty;
+  process: ChildProcessWithoutNullStreams;
   projectPath: string;
   model?: string;
   claudeSessionId?: string;
@@ -17,23 +18,26 @@ export class PtyManager extends EventEmitter {
 
   /** Find the claude binary, throw if not installed */
   static findClaude(): string {
+    // Try `which` first — respects the user's actual PATH
+    try {
+      const found = execSync('which claude', { encoding: 'utf8', env: process.env }).trim();
+      if (found) return found;
+    } catch {}
+
+    // Fallback: check common install locations
     const candidates = [
+      `${process.env.HOME}/.local/bin/claude`,
       '/opt/homebrew/bin/claude',
       '/usr/local/bin/claude',
       '/usr/bin/claude',
     ];
     for (const c of candidates) {
-      try {
-        if (require('fs').existsSync(c)) return c;
-      } catch {}
+      if (existsSync(c)) return c;
     }
-    try {
-      return execSync('which claude', { encoding: 'utf8' }).trim();
-    } catch {
-      throw new Error(
-        'claude CLI not found. Install Claude Code: https://claude.ai/download'
-      );
-    }
+
+    throw new Error(
+      'claude CLI not found. Install Claude Code: https://claude.ai/download'
+    );
   }
 
   createSession(options: {
@@ -55,22 +59,17 @@ export class PtyManager extends EventEmitter {
     if (options.resumeSessionId) args.push('--resume', options.resumeSessionId);
     if (options.permissionMode) args.push('--permission-mode', options.permissionMode);
 
-    const ptyProcess = pty.spawn(claudeBin, args, {
-      name: 'xterm-256color',
-      cols: 220,
-      rows: 50,
+    // Strip CLAUDECODE so nested sessions are allowed
+    const { CLAUDECODE: _omit, ...cleanEnv } = process.env as Record<string, string | undefined>;
+    const childProcess = spawn(claudeBin, args, {
       cwd: options.projectPath,
-      env: {
-        ...process.env,
-        FORCE_COLOR: '0',
-        NO_COLOR: '1',
-        TERM: 'dumb',
-      },
+      env: { ...cleanEnv, FORCE_COLOR: '0', NO_COLOR: '1', TERM: 'dumb' },
+      stdio: ['pipe', 'pipe', 'pipe'],
     });
 
     const session: ChatSession = {
       id: options.id,
-      ptyProcess,
+      process: childProcess,
       projectPath: options.projectPath,
       model: options.model,
       status: 'starting',
@@ -79,14 +78,18 @@ export class PtyManager extends EventEmitter {
 
     this.sessions.set(options.id, session);
 
-    ptyProcess.onData((data: string) => {
-      this.emit('pty-output', options.id, data);
+    childProcess.stdout.on('data', (chunk: Buffer) => {
+      this.emit('pty-output', options.id, chunk.toString('utf8'));
     });
 
-    ptyProcess.onExit(({ exitCode }: { exitCode: number }) => {
+    childProcess.stderr.on('data', (chunk: Buffer) => {
+      this.emit('pty-output', options.id, chunk.toString('utf8'));
+    });
+
+    childProcess.on('exit', (code) => {
       session.status = 'ended';
       this.sessions.delete(options.id);
-      this.emit('session-end', options.id, exitCode);
+      this.emit('session-end', options.id, code ?? 1);
     });
 
     return session;
@@ -95,14 +98,14 @@ export class PtyManager extends EventEmitter {
   sendInput(sessionId: string, text: string): void {
     const session = this.sessions.get(sessionId);
     if (!session || session.status === 'ended') return;
-    session.ptyProcess.write(text);
+    session.process.stdin.write(text, 'utf8');
   }
 
   killSession(sessionId: string): void {
     const session = this.sessions.get(sessionId);
     if (!session) return;
     try {
-      session.ptyProcess.kill();
+      session.process.kill('SIGTERM');
     } catch {}
     session.status = 'ended';
     this.sessions.delete(sessionId);

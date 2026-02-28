@@ -8,6 +8,7 @@ Runs as a **web app** (browser) or a **native desktop app** (Tauri v2).
 
 | Feature | Description |
 |---------|-------------|
+| **Chat** | Embedded Claude Code chat with split-pane view — rich message UI on the left, raw terminal output on the right |
 | **Session Browser** | Browse all past sessions with conversation replay, collapsible thinking blocks, tool call details |
 | **Bookmarks, Tags & Notes** | Bookmark sessions, add searchable tags, and write persistent notes per session |
 | **Export** | Export any session as Markdown or JSON |
@@ -51,7 +52,7 @@ Claude Code stores all conversation data locally in `~/.claude/projects/<project
 ### Prerequisites
 
 - Node.js 18+
-- Claude Code installed with at least one session recorded
+- Claude Code installed (`claude` must be on your `$PATH`) with at least one session recorded
 
 ### Web App
 
@@ -65,6 +66,8 @@ npm run dev
 Open **http://localhost:5173** in your browser.
 
 The backend API runs on port `3456`, the frontend dev server on `5173`. Vite proxies `/api` and `/ws` automatically in dev mode.
+
+> **Note:** `npm install` runs a `postinstall` script that makes the node-pty helper binary executable. If you ever see a `posix_spawnp failed` error in the Chat page, run `npm install` again or `chmod +x node_modules/node-pty/prebuilds/darwin-arm64/spawn-helper`.
 
 ### Desktop App (Tauri)
 
@@ -108,6 +111,9 @@ claude-dashboard/
         session-meta.ts     # Bookmarks, tags, notes, budgets (dashboard-meta.json)
         search-index.ts     # Full-text search
         file-watcher.ts     # chokidar live session watching
+        pty-manager.ts      # Spawns claude CLI as a child process (piped stdio)
+        protocol-parser.ts  # Parses newline-delimited JSON from claude output
+        session-manager.ts  # Orchestrates PTY + parser + WebSocket notifications
         cache.ts            # LRU cache with mtime invalidation
       utils/
         jsonl-reader.ts     # Streaming JSONL reader
@@ -136,11 +142,26 @@ claude-dashboard/
       files/timeline/+page.svelte     # Per-file edit history
       live/+page.svelte               # Live session monitor
       search/+page.svelte             # Full-text search
+      chat/+page.svelte               # Embedded Claude Code chat (split-pane)
   src-tauri/                          # Tauri v2 Rust app
     src/lib.rs                        # System tray, backend spawn, window management
     tauri.conf.json                   # App config (1280×800, tray icon)
     Cargo.toml                        # tauri, tauri-plugin-shell, tauri-plugin-log
 ```
+
+## Using the Chat
+
+The **Chat** page (`/chat`) lets you run Claude Code interactively without leaving the dashboard.
+
+1. Select a **project path** from the dropdown (or type one manually)
+2. Choose a **model** and **permission mode**
+3. Click **Start Session** — the session starts and the split-pane view appears
+4. Type your message and press **Enter** to send
+5. The left panel shows structured responses (markdown, tool calls, thinking blocks); the right panel shows the raw JSON stream from the CLI
+6. Click **✕ End** in the header to stop the session — your conversation stays on screen for review
+7. Click **+ New Session** to return to the setup form
+
+You can also click **Resume in Chat** on any past session's detail page to pick up where you left off.
 
 ## API Reference
 
@@ -163,7 +184,16 @@ claude-dashboard/
 | `GET /api/meta/budgets/current` | Cost budget thresholds |
 | `PUT /api/meta/budgets/current` | Update budget thresholds |
 | `GET /api/files/timeline?path=` | Edit history for a specific file |
-| `WS  /ws` | WebSocket for live session streaming |
+| `WS  /ws` | WebSocket for live session streaming + chat |
+
+**WebSocket chat messages (client → server):**
+
+| Message | Description |
+|---------|-------------|
+| `{type:"chat-create", projectPath, model?, resumeSessionId?, permissionMode?}` | Start a new Claude Code session |
+| `{type:"chat-send", sessionId, text}` | Send a message to Claude |
+| `{type:"chat-approve", sessionId, toolId, approved}` | Approve/deny a tool use request |
+| `{type:"chat-end", sessionId}` | Kill the session |
 
 ## Usage tip
 

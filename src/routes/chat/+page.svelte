@@ -26,8 +26,8 @@
   let permissionMode = $state('default');
 
   // UI state
-  let messagesContainer: HTMLElement;
-  let terminalPanel: ReturnType<typeof TerminalPanel> | null = null;
+  let messagesContainer = $state<HTMLElement | null>(null);
+  let terminalPanel = $state<ReturnType<typeof TerminalPanel> | null>(null);
   let showTerminal = $state(true);
   let splitPercent = $state(62);
   let isDragging = $state(false);
@@ -245,13 +245,22 @@
             {:else if state.status === 'ended'}
               <span class="text-xs text-gray-500">Session ended</span>
             {/if}
-            <button
-              onclick={() => { endChatSession(); setTimeout(resetChat, 300); }}
-              class="text-xs text-gray-600 hover:text-red-400 transition-colors"
-              title="End session"
-            >
-              ✕ End
-            </button>
+            {#if state.status === 'ended'}
+              <button
+                onclick={resetChat}
+                class="px-3 py-1 bg-blue-600 hover:bg-blue-500 rounded text-xs text-white font-medium transition-colors"
+              >
+                + New Session
+              </button>
+            {:else}
+              <button
+                onclick={endChatSession}
+                class="text-xs text-gray-600 hover:text-red-400 transition-colors"
+                title="End session"
+              >
+                ✕ End
+              </button>
+            {/if}
           </div>
         </div>
 
@@ -330,14 +339,8 @@
 
           <!-- Session ended -->
           {#if state.status === 'ended'}
-            <div class="text-center py-4 space-y-3">
-              <p class="text-sm text-gray-500">Session ended</p>
-              <button
-                onclick={resetChat}
-                class="px-4 py-2 bg-gray-800 border border-gray-700 rounded-lg text-sm text-gray-300 hover:bg-gray-700"
-              >
-                Start new session
-              </button>
+            <div class="text-center py-6">
+              <p class="text-xs text-gray-600">Session ended — click <strong class="text-gray-400">+ New Session</strong> in the header to start a fresh chat</p>
             </div>
           {/if}
 

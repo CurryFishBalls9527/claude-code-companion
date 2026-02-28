@@ -261,13 +261,10 @@ export type WsServerMessage = WsSessionUpdateMessage;
 
 /** Events emitted by `claude --output-format stream-json` */
 export type StreamEvent =
-  | { type: 'system'; subtype: 'init'; session_id: string; tools: string[]; model: string }
-  | { type: 'assistant'; subtype: 'thinking'; content_block_index: number; text: string }
-  | { type: 'assistant'; subtype: 'text'; content_block_index: number; text: string }
-  | { type: 'assistant'; subtype: 'tool_use'; content_block_index: number; id: string; name: string; input: Record<string, unknown> }
-  | { type: 'assistant'; subtype: 'input_json_delta'; content_block_index: number; partial_json: string }
-  | { type: 'result'; subtype: 'success'; session_id: string; usage: TokenUsage; model: string; cost_usd: number; duration_ms: number; num_turns: number }
-  | { type: 'result'; subtype: 'error'; error: string }
+  | { type: 'system'; subtype: 'init'; session_id: string; tools: string[]; model: string; cwd?: string; permissionMode?: string }
+  | { type: 'assistant'; message: RawAssistantMessage; session_id: string; uuid?: string; parent_tool_use_id?: string | null }
+  | { type: 'result'; subtype: 'success'; session_id: string; usage: TokenUsage; total_cost_usd: number; duration_ms: number; num_turns: number }
+  | { type: 'result'; subtype: 'error'; error: string; is_error?: boolean }
   | { type: 'tool'; subtype: 'approval_request'; tool_name: string; tool_id: string; input: Record<string, unknown> }
   | { type: 'tool'; subtype: 'result'; tool_id: string; output: string; is_error: boolean };
 

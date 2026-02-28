@@ -66,21 +66,22 @@ export function handleStreamEvent(event: StreamEvent): void {
 
     if (event.type === 'assistant') {
       next.isStreaming = true;
-      if (event.subtype === 'thinking') {
-        next.streaming = { ...next.streaming, thinking: next.streaming.thinking + event.text };
+      const content = event.message?.content ?? [];
+      let thinking = next.streaming.thinking;
+      let text = next.streaming.text;
+      const tools = [...next.streaming.toolCalls];
+
+      for (const block of content) {
+        if (block.type === 'thinking' && block.thinking) {
+          thinking += block.thinking;
+        } else if (block.type === 'text' && block.text) {
+          text += block.text;
+        } else if (block.type === 'tool_use' && block.id && block.name) {
+          tools.push({ id: block.id, name: block.name, input: (block.input ?? {}) as Record<string, unknown> });
+        }
       }
-      if (event.subtype === 'text') {
-        next.streaming = { ...next.streaming, text: next.streaming.text + event.text };
-      }
-      if (event.subtype === 'tool_use') {
-        const tools = [...next.streaming.toolCalls];
-        tools.push({ id: event.id, name: event.name, input: event.input });
-        next.streaming = { ...next.streaming, toolCalls: tools };
-      }
-      if (event.subtype === 'input_json_delta') {
-        // Append partial JSON to the last in-progress tool call's input
-        // (input is already complete in tool_use event for most cases; skip for now)
-      }
+
+      next.streaming = { thinking, text, toolCalls: tools };
       return next;
     }
 
@@ -91,7 +92,6 @@ export function handleStreamEvent(event: StreamEvent): void {
     }
 
     if (event.type === 'tool' && event.subtype === 'result') {
-      // Update the matching tool call in streaming state with result
       const tools = next.streaming.toolCalls.map((tc) =>
         tc.id === event.tool_id
           ? { ...tc, result: event.output, isError: event.is_error }
@@ -102,7 +102,6 @@ export function handleStreamEvent(event: StreamEvent): void {
     }
 
     if (event.type === 'result' && event.subtype === 'success') {
-      // Finalize the streaming message into the messages array
       const msg: ChatMessage = {
         role: 'assistant',
         thinking: next.streaming.thinking || undefined,
@@ -110,7 +109,7 @@ export function handleStreamEvent(event: StreamEvent): void {
         toolCalls: next.streaming.toolCalls.length > 0 ? next.streaming.toolCalls : undefined,
         timestamp: new Date().toISOString(),
         usage: event.usage,
-        cost: event.cost_usd,
+        cost: event.total_cost_usd,
       };
       next.messages = [...next.messages, msg];
       next.streaming = resetStreaming();

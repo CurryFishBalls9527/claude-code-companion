@@ -14,7 +14,8 @@
     "format": "prettier --write .",
     "tauri": "tauri",
     "tauri:dev": "concurrently \"npm run dev:backend\" \"PATH=$HOME/.cargo/bin:$PATH tauri dev\"",
-    "tauri:build": "npm run build && PATH=$HOME/.cargo/bin:$PATH tauri build"
+    "tauri:build": "npm run build && PATH=$HOME/.cargo/bin:$PATH tauri build",
+    "postinstall": "chmod +x node_modules/node-pty/prebuilds/darwin-arm64/spawn-helper 2>/dev/null || true"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.10.1",

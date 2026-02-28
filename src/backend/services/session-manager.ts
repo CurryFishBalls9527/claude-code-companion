@@ -68,25 +68,26 @@ export class SessionManager {
     this.notify(sessionId, { type: 'chat-event', sessionId, event });
 
     // Track state transitions
-    if (event.type === 'system' && event.subtype === 'init') {
+    if (event.type === 'system' && 'subtype' in event && event.subtype === 'init') {
       chat.status = 'active';
       const ptySession = this.ptyManager.getSession(sessionId);
       if (ptySession) ptySession.claudeSessionId = event.session_id;
     }
 
-    if (event.type === 'tool' && event.subtype === 'approval_request') {
+    if (event.type === 'tool' && 'subtype' in event && event.subtype === 'approval_request') {
       chat.status = 'waiting_approval';
+      const e = event as Extract<typeof event, { subtype: 'approval_request' }>;
       chat.pendingApproval = {
-        toolId: event.tool_id,
-        toolName: event.tool_name,
-        input: event.input,
+        toolId: e.tool_id,
+        toolName: e.tool_name,
+        input: e.input,
       };
       this.notify(sessionId, {
         type: 'tool-approval-request',
         sessionId,
-        toolId: event.tool_id,
-        toolName: event.tool_name,
-        input: event.input,
+        toolId: e.tool_id,
+        toolName: e.tool_name,
+        input: e.input,
       });
     }
 
@@ -116,7 +117,7 @@ export class SessionManager {
   sendMessage(sessionId: string, text: string): void {
     const chat = this.chats.get(sessionId);
     if (!chat || chat.status === 'ended') return;
-    const payload = JSON.stringify({ type: 'user', message: text }) + '\n';
+    const payload = JSON.stringify({ type: 'user', message: { role: 'user', content: text } }) + '\n';
     this.ptyManager.sendInput(sessionId, payload);
   }
 
