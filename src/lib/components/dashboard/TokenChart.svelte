@@ -44,7 +44,17 @@
             grid: { color: '#1f2937' },
           },
           y: {
-            ticks: { color: '#6b7280' },
+            beginAtZero: true,
+            ticks: {
+              color: '#6b7280',
+              maxTicksLimit: 6,
+              callback: (value: number | string) => {
+                const num = typeof value === 'number' ? value : parseFloat(String(value));
+                if (num >= 1_000_000) return (num / 1_000_000).toFixed(1) + 'M';
+                if (num >= 1_000) return (num / 1_000).toFixed(num >= 10_000 ? 0 : 1) + 'k';
+                return num.toString();
+              },
+            },
             grid: { color: '#1f2937' },
           },
         },

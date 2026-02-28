@@ -101,11 +101,36 @@ export function handleStreamEvent(event: StreamEvent): void {
       return next;
     }
 
-    if (event.type === 'result' && event.subtype === 'success') {
+    // User events carry tool results (including permission denials)
+    if (event.type === 'user' && event.tool_use_result) {
+      // Match tool result back to streaming tool calls
+      const content = typeof event.message?.content === 'string' ? [] : (event.message?.content ?? []);
+      const tools = [...next.streaming.toolCalls];
+      for (const block of content) {
+        if (block.type === 'tool_result' && block.tool_use_id) {
+          const idx = tools.findIndex((tc) => tc.id === block.tool_use_id);
+          if (idx >= 0) {
+            const resultText = typeof block.content === 'string' ? block.content : JSON.stringify(block.content);
+            tools[idx] = { ...tools[idx], result: resultText, isError: block.is_error };
+          }
+        }
+      }
+      next.streaming = { ...next.streaming, toolCalls: tools };
+      return next;
+    }
+
+    if (event.type === 'result' && (event.subtype === 'success' || event.subtype === 'error_max_turns')) {
+      // Build permission denial warning text
+      let denialText = '';
+      if ('permission_denials' in event && event.permission_denials && event.permission_denials.length > 0) {
+        const names = event.permission_denials.map((d) => d.tool_name).join(', ');
+        denialText = `\n\n⚠️ Permission denied for: ${names}. Consider using "Accept edits" or "Bypass all" permission mode.`;
+      }
+
       const msg: ChatMessage = {
         role: 'assistant',
         thinking: next.streaming.thinking || undefined,
-        text: next.streaming.text || undefined,
+        text: (next.streaming.text || '') + denialText || undefined,
         toolCalls: next.streaming.toolCalls.length > 0 ? next.streaming.toolCalls : undefined,
         timestamp: new Date().toISOString(),
         usage: event.usage,
@@ -131,7 +156,7 @@ export function handleStreamEvent(event: StreamEvent): void {
   });
 }
 
-export function createChatSession(projectPath: string, model?: string, resumeSessionId?: string): void {
+export function createChatSession(projectPath: string, model?: string, resumeSessionId?: string, permissionMode?: string): void {
   const ws = getWsClient();
   chatState.update((s) => ({
     ...DEFAULT_STATE,
@@ -140,7 +165,7 @@ export function createChatSession(projectPath: string, model?: string, resumeSes
     status: 'creating',
     promptHistory: s.promptHistory,
   }));
-  ws.createChatSession(projectPath, model, resumeSessionId);
+  ws.createChatSession(projectPath, model, resumeSessionId, permissionMode);
 }
 
 export function sendChatMessage(text: string): void {

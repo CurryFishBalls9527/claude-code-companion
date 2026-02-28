@@ -263,8 +263,11 @@ export type WsServerMessage = WsSessionUpdateMessage;
 export type StreamEvent =
   | { type: 'system'; subtype: 'init'; session_id: string; tools: string[]; model: string; cwd?: string; permissionMode?: string }
   | { type: 'assistant'; message: RawAssistantMessage; session_id: string; uuid?: string; parent_tool_use_id?: string | null }
-  | { type: 'result'; subtype: 'success'; session_id: string; usage: TokenUsage; total_cost_usd: number; duration_ms: number; num_turns: number }
+  | { type: 'user'; message: RawUserMessage; session_id: string; tool_use_result?: string }
+  | { type: 'result'; subtype: 'success'; session_id: string; usage: TokenUsage; total_cost_usd: number; duration_ms: number; num_turns: number; permission_denials?: { tool_name: string; tool_use_id: string; tool_input: Record<string, unknown> }[] }
+  | { type: 'result'; subtype: 'error_max_turns'; session_id: string; usage: TokenUsage; total_cost_usd: number; duration_ms: number; num_turns: number; permission_denials?: { tool_name: string; tool_use_id: string; tool_input: Record<string, unknown> }[] }
   | { type: 'result'; subtype: 'error'; error: string; is_error?: boolean }
+  | { type: 'rate_limit_event'; [key: string]: unknown }
   | { type: 'tool'; subtype: 'approval_request'; tool_name: string; tool_id: string; input: Record<string, unknown> }
   | { type: 'tool'; subtype: 'result'; tool_id: string; output: string; is_error: boolean };
 

@@ -23,7 +23,7 @@
   let projects = $state<ProjectInfo[]>([]);
   let projectPath = $state('');
   let model = $state('claude-sonnet-4-5');
-  let permissionMode = $state('default');
+  let permissionMode = $state('acceptEdits');
 
   // UI state
   let messagesContainer = $state<HTMLElement | null>(null);
@@ -71,10 +71,12 @@
       }),
     );
 
-    // Check for ?resume= param
+    // Check for ?resume= param (optionally with ?project= to set correct cwd)
     const resumeId = $page.url.searchParams.get('resume');
-    if (resumeId && projectPath) {
-      createChatSession(projectPath, model, resumeId);
+    const projectParam = $page.url.searchParams.get('project');
+    if (resumeId) {
+      if (projectParam) projectPath = projectParam;
+      if (projectPath) createChatSession(projectPath, model, resumeId, permissionMode);
     }
   });
 
@@ -109,7 +111,7 @@
 
   function startSession() {
     if (!projectPath.trim()) return;
-    createChatSession(projectPath.trim(), model || undefined, undefined);
+    createChatSession(projectPath.trim(), model || undefined, undefined, permissionMode);
   }
 
   function handleSend(text: string) {
@@ -191,9 +193,10 @@
                 bind:value={permissionMode}
                 class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2.5 text-sm text-gray-200 focus:outline-none focus:border-blue-500"
               >
-                <option value="default">Default (ask)</option>
-                <option value="acceptEdits">Accept edits</option>
-                <option value="bypassPermissions">Bypass all</option>
+                <option value="acceptEdits">Accept edits (Recommended)</option>
+                <option value="bypassPermissions">Bypass all permissions</option>
+                <option value="default">Default (deny tools)</option>
+                <option value="plan">Plan only (read-only)</option>
               </select>
             </div>
           </div>
@@ -213,17 +216,26 @@
     <!-- ── Active chat split view ── -->
     <div
       id="split-container"
-      class="flex-1 flex overflow-hidden select-none"
+      class="flex-1 flex overflow-hidden"
       style="cursor: {isDragging ? 'col-resize' : 'default'}"
     >
       <!-- Left: Rich chat panel -->
-      <div class="flex flex-col overflow-hidden" style="width: {splitPercent}%">
+      <div class="flex flex-col overflow-hidden" style="width: {showTerminal ? splitPercent + '%' : '100%'}">
         <!-- Chat header -->
         <div class="flex items-center gap-3 px-4 py-2.5 border-b border-gray-800 shrink-0">
-          <div class="flex-1 min-w-0">
+          <div class="flex-1 min-w-0 flex items-center gap-2">
             <span class="text-xs text-gray-500 font-mono truncate">{state.projectPath.split('/').pop()}</span>
-            {#if state.claudeSessionId}
-              <span class="text-xs text-gray-700 ml-2 font-mono">{state.claudeSessionId.slice(0, 8)}…</span>
+            {#if state.claudeSessionId || state.sessionId}
+              <span class="text-xs text-gray-400 font-mono">| {(state.claudeSessionId ?? state.sessionId ?? '').slice(0, 8)}…</span>
+              <button
+                onclick={() => {
+                  navigator.clipboard.writeText(state.claudeSessionId || state.sessionId || '');
+                }}
+                class="text-xs text-gray-400 hover:text-blue-400 transition-colors cursor-pointer"
+                title="Copy full session ID: {state.claudeSessionId || state.sessionId || ''}"
+              >
+                📋
+              </button>
             {/if}
           </div>
           <div class="flex items-center gap-2 shrink-0">
@@ -371,27 +383,42 @@
         />
       </div>
 
-      <!-- Divider -->
-      <div
-        onmousedown={startDrag}
-        class="w-1 bg-gray-800 hover:bg-blue-600/50 cursor-col-resize shrink-0 transition-colors"
-      ></div>
+      <!-- Divider (only when terminal is visible) -->
+      {#if showTerminal}
+        <div
+          onmousedown={startDrag}
+          class="w-1 bg-gray-800 hover:bg-blue-600/50 cursor-col-resize shrink-0 transition-colors"
+        ></div>
+      {/if}
 
       <!-- Right: Terminal panel -->
-      <div class="flex flex-col overflow-hidden flex-1">
-        <div class="flex items-center justify-between px-3 py-2 border-b border-gray-800 shrink-0">
-          <span class="text-xs text-gray-500 font-medium">Raw Terminal Output</span>
-          <button
-            onclick={() => (showTerminal = !showTerminal)}
-            class="text-xs text-gray-600 hover:text-gray-400"
-          >
-            {showTerminal ? 'Hide' : 'Show'}
-          </button>
+      {#if showTerminal}
+        <div class="flex flex-col overflow-hidden" style="width: {(100 - splitPercent) + '%'}">
+          <div class="flex items-center justify-between px-3 py-2 border-b border-gray-800 shrink-0">
+            <span class="text-xs text-gray-500 font-medium">Raw Terminal Output</span>
+            <button
+              onclick={() => (showTerminal = false)}
+              class="text-xs text-gray-600 hover:text-gray-400"
+            >
+              Hide ▸
+            </button>
+          </div>
+          <div class="flex-1 overflow-hidden">
+            <TerminalPanel bind:this={terminalPanel} visible={true} />
+          </div>
         </div>
-        <div class="flex-1 overflow-hidden">
-          <TerminalPanel bind:this={terminalPanel} visible={showTerminal} />
+      {:else}
+        <div class="flex flex-col shrink-0 border-l border-gray-800">
+          <div class="px-2 py-2">
+            <button
+              onclick={() => (showTerminal = true)}
+              class="text-xs text-gray-600 hover:text-gray-400"
+            >
+              ◂ Show
+            </button>
+          </div>
         </div>
-      </div>
+      {/if}
     </div>
   {/if}
 </div>

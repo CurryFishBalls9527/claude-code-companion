@@ -161,7 +161,7 @@
             {meta?.bookmarked ? 'Bookmarked' : 'Bookmark'}
           </button>
           <a
-            href="/chat?resume={session.id}"
+            href="/chat?resume={session.id}&project={encodeURIComponent(session.projectPath)}"
             class="px-3 py-1 bg-green-800/60 border border-green-700/60 rounded text-xs text-green-300 hover:bg-green-700/60"
           >
             Resume in Chat
