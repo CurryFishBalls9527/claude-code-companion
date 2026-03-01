@@ -2,9 +2,10 @@
   import { onMount } from 'svelte';
   import { page } from '$app/stores';
   import { api } from '$lib/api/client.js';
-  import type { SessionDetail, SessionMeta } from '$shared/types.js';
+  import type { SessionDetail, SessionMeta, FileDiff } from '$shared/types.js';
   import { toggleBookmark, updateTags, updateNotes } from '$lib/stores/meta.js';
   import MessageCard from '$lib/components/session/MessageCard.svelte';
+  import DiffViewer from '$lib/components/diff/DiffViewer.svelte';
   import LoadingSpinner from '$lib/components/shared/LoadingSpinner.svelte';
   import Badge from '$lib/components/shared/Badge.svelte';
 
@@ -16,6 +17,11 @@
   let error = $state<string | null>(null);
   let replayStep = $state(-1);
   let replayMode = $state(false);
+
+  // Diff mode
+  let diffMode = $state(false);
+  let diffs = $state<FileDiff[]>([]);
+  let diffsLoading = $state(false);
 
   // Tags editing
   let newTag = $state('');
@@ -109,6 +115,38 @@
           : session.messages)
       : []
   );
+
+  // Messages that contain Edit or Write tool calls
+  const diffMessages = $derived(
+    visibleMessages.filter((m) =>
+      m.toolCalls?.some((tc) => tc.name === 'Edit' || tc.name === 'Write')
+    )
+  );
+
+  // Map tool call IDs to their diffs for quick lookup
+  const diffsByToolCallId = $derived.by(() => {
+    const map = new Map<string, FileDiff>();
+    for (const d of diffs) map.set(d.toolCallId, d);
+    return map;
+  });
+
+  async function toggleDiffMode() {
+    if (diffMode) {
+      diffMode = false;
+      return;
+    }
+    diffMode = true;
+    if (diffs.length === 0) {
+      diffsLoading = true;
+      try {
+        diffs = await api.getSessionDiffs(id);
+      } catch (e) {
+        console.error('Failed to load diffs:', e);
+      } finally {
+        diffsLoading = false;
+      }
+    }
+  }
 
   function startReplay() { replayMode = true; replayStep = 0; }
   function stopReplay() { replayMode = false; replayStep = -1; }
@@ -240,7 +278,7 @@
       </div>
     </div>
 
-    <!-- Replay controls -->
+    <!-- Replay / Diff controls -->
     <div class="flex items-center gap-3">
       {#if !replayMode}
         <button
@@ -251,6 +289,20 @@
             <path d="M6.3 2.841A1.5 1.5 0 004 4.11V15.89a1.5 1.5 0 002.3 1.269l9.344-5.89a1.5 1.5 0 000-2.538L6.3 2.84z" />
           </svg>
           Replay
+        </button>
+        <button
+          onclick={toggleDiffMode}
+          class="flex items-center gap-1.5 px-3 py-1.5 rounded text-xs transition-colors {diffMode
+            ? 'bg-orange-700/40 border border-orange-600/50 text-orange-300'
+            : 'bg-gray-800 border border-gray-700 text-gray-400 hover:bg-gray-700'}"
+        >
+          <svg class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M4 6h16M4 12h8m-8 6h16" />
+          </svg>
+          {diffMode ? 'Show All' : 'Diffs Only'}
+          {#if session.editCount > 0}
+            <span class="text-[10px] opacity-70">({session.editCount})</span>
+          {/if}
         </button>
       {:else}
         <button onclick={stopReplay} class="px-3 py-1.5 bg-gray-800 border border-gray-700 rounded text-xs text-gray-300 hover:bg-gray-700">
@@ -269,19 +321,65 @@
 
     <!-- Messages -->
     <div class="flex-1 space-y-3 overflow-auto pb-4">
-      {#each visibleMessages as message (message.uuid)}
-        <div class="animate-in fade-in duration-200 group relative">
-          <MessageCard {message} />
-          {#if message.role === 'assistant' && session}
-            <a
-              href="/chat?resume={session.id}&project={encodeURIComponent(session.projectPath)}"
-              class="absolute top-2 right-2 opacity-0 group-hover:opacity-100 px-2 py-0.5 bg-gray-700/80 border border-gray-600 rounded text-[10px] text-gray-400 hover:text-green-300 hover:border-green-600/40 transition-all"
-            >
-              Resume from here
-            </a>
-          {/if}
-        </div>
-      {/each}
+      {#if diffMode}
+        {#if diffsLoading}
+          <LoadingSpinner />
+        {:else if diffMessages.length === 0}
+          <div class="text-center text-sm text-gray-500 py-8">No file edits in this session</div>
+        {:else}
+          {#each diffMessages as message (message.uuid)}
+            <div class="bg-gray-900 border border-gray-800 rounded-lg overflow-hidden">
+              <!-- Compact message header -->
+              <div class="px-4 py-2 border-b border-gray-800 flex items-center gap-3">
+                <span class="text-[10px] text-gray-600 font-mono">{new Date(message.timestamp).toLocaleTimeString()}</span>
+                <span class="text-xs text-gray-400 truncate flex-1">
+                  {message.text?.slice(0, 120) ?? ''}
+                  {#if message.text && message.text.length > 120}...{/if}
+                </span>
+                <span class="text-[10px] text-gray-600">
+                  {message.toolCalls?.filter((tc) => tc.name === 'Edit' || tc.name === 'Write').length} edit{message.toolCalls?.filter((tc) => tc.name === 'Edit' || tc.name === 'Write').length === 1 ? '' : 's'}
+                </span>
+              </div>
+              <!-- Diffs for this message -->
+              <div class="p-3 space-y-4">
+                {#each (message.toolCalls ?? []).filter((tc) => tc.name === 'Edit' || tc.name === 'Write') as tc (tc.id)}
+                  {@const fileDiff = diffsByToolCallId.get(tc.id)}
+                  {#if fileDiff}
+                    <DiffViewer diff={fileDiff} />
+                  {:else}
+                    <!-- Fallback: show raw old/new from tool input -->
+                    <div class="space-y-1">
+                      <div class="text-xs font-mono text-gray-400 truncate">{tc.input.file_path ?? 'unknown file'}</div>
+                      {#if tc.name === 'Edit' && tc.input.old_string != null}
+                        <div class="rounded border border-gray-700 overflow-hidden text-xs font-mono">
+                          <div class="bg-red-950/30 px-3 py-1.5 text-red-300 whitespace-pre-wrap break-all">- {tc.input.old_string}</div>
+                          <div class="bg-green-950/30 px-3 py-1.5 text-green-300 whitespace-pre-wrap break-all">+ {tc.input.new_string}</div>
+                        </div>
+                      {:else}
+                        <div class="text-[10px] text-gray-600">{tc.name} (no diff available)</div>
+                      {/if}
+                    </div>
+                  {/if}
+                {/each}
+              </div>
+            </div>
+          {/each}
+        {/if}
+      {:else}
+        {#each visibleMessages as message (message.uuid)}
+          <div class="animate-in fade-in duration-200 group relative">
+            <MessageCard {message} />
+            {#if message.role === 'assistant' && session}
+              <a
+                href="/chat?resume={session.id}&project={encodeURIComponent(session.projectPath)}"
+                class="absolute top-2 right-2 opacity-0 group-hover:opacity-100 px-2 py-0.5 bg-gray-700/80 border border-gray-600 rounded text-[10px] text-gray-400 hover:text-green-300 hover:border-green-600/40 transition-all"
+              >
+                Resume from here
+              </a>
+            {/if}
+          </div>
+        {/each}
+      {/if}
     </div>
   {/if}
 </div>
