@@ -1,12 +1,22 @@
 <script lang="ts">
+  import type { SlashCommand, AgentInfo } from '$lib/stores/chat.js';
+  import SlashCommandMenu from './SlashCommandMenu.svelte';
+  import AgentMentionMenu from './AgentMentionMenu.svelte';
+
   let {
     disabled = false,
     onSend,
-    placeholder = 'Message Claude… (Enter to send, Shift+Enter for newline)',
+    onSlashCommand,
+    placeholder = 'Message Claude... (Enter to send, Shift+Enter for newline)',
+    availableCommands = [],
+    availableAgents = [],
   }: {
     disabled?: boolean;
     onSend: (text: string) => void;
+    onSlashCommand?: (command: SlashCommand, args: string) => void;
     placeholder?: string;
+    availableCommands?: SlashCommand[];
+    availableAgents?: AgentInfo[];
   } = $props();
 
   let value = $state('');
@@ -14,6 +24,15 @@
   let history = $state<string[]>([]);
   let savedDraft = '';
   let textarea: HTMLTextAreaElement;
+
+  // Menu state
+  let showSlashMenu = $state(false);
+  let slashFilter = $state('');
+  let showAgentMenu = $state(false);
+  let agentFilter = $state('');
+
+  let slashMenuRef: SlashCommandMenu;
+  let agentMenuRef: AgentMentionMenu;
 
   export function pushHistory(text: string) {
     history = [text, ...history.slice(0, 49)];
@@ -28,11 +47,70 @@
     value = '';
     historyIndex = -1;
     savedDraft = '';
-    // Reset textarea height
+    showSlashMenu = false;
+    showAgentMenu = false;
     if (textarea) textarea.style.height = 'auto';
   }
 
+  function handleInput(e: Event) {
+    const text = (e.target as HTMLTextAreaElement).value;
+
+    // Slash command detection: "/" at start of input
+    if (text.startsWith('/')) {
+      showSlashMenu = true;
+      slashFilter = text.slice(1).split(' ')[0] ?? '';
+      showAgentMenu = false;
+    } else {
+      showSlashMenu = false;
+    }
+
+    // Agent mention detection: "@" at start or after space
+    const atMatch = text.match(/(^|\s)@(\w*)$/);
+    if (atMatch && availableAgents.length > 0) {
+      showAgentMenu = true;
+      agentFilter = atMatch[2] ?? '';
+      showSlashMenu = false;
+    } else if (!text.includes('@')) {
+      showAgentMenu = false;
+    }
+  }
+
+  function handleSlashSelect(cmd: SlashCommand) {
+    showSlashMenu = false;
+    if (onSlashCommand) {
+      const args = value.includes(' ') ? value.slice(value.indexOf(' ') + 1) : '';
+      onSlashCommand(cmd, args);
+      value = '';
+      if (textarea) textarea.style.height = 'auto';
+    } else {
+      // Fallback: send as text
+      value = '/' + cmd.name;
+      send();
+    }
+  }
+
+  function handleAgentSelect(agent: AgentInfo) {
+    showAgentMenu = false;
+    // Replace the @partial with @AgentName and a trailing space
+    const atMatch = value.match(/(^|\s)@\w*$/);
+    if (atMatch) {
+      const prefix = value.slice(0, atMatch.index! + (atMatch[1]?.length ?? 0));
+      value = prefix + '@' + agent.name + ' ';
+    }
+    textarea?.focus();
+  }
+
   function handleKeydown(e: KeyboardEvent) {
+    // Delegate to menus if open
+    if (showSlashMenu && slashMenuRef?.handleKeydown(e)) {
+      if (e.key === 'Escape') showSlashMenu = false;
+      return;
+    }
+    if (showAgentMenu && agentMenuRef?.handleKeydown(e)) {
+      if (e.key === 'Escape') showAgentMenu = false;
+      return;
+    }
+
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       send();
@@ -64,12 +142,32 @@
   }
 </script>
 
-<div class="flex items-end gap-2 p-3 border-t border-gray-800 bg-gray-950">
+<div class="relative flex items-end gap-2 p-3 border-t border-gray-800 bg-gray-950">
+  <!-- Slash command menu -->
+  {#if showSlashMenu}
+    <SlashCommandMenu
+      bind:this={slashMenuRef}
+      commands={availableCommands}
+      filter={slashFilter}
+      onSelect={handleSlashSelect}
+    />
+  {/if}
+
+  <!-- Agent mention menu -->
+  {#if showAgentMenu}
+    <AgentMentionMenu
+      bind:this={agentMenuRef}
+      agents={availableAgents}
+      filter={agentFilter}
+      onSelect={handleAgentSelect}
+    />
+  {/if}
+
   <textarea
     bind:this={textarea}
     bind:value
     onkeydown={handleKeydown}
-    oninput={autoResize}
+    oninput={(e) => { autoResize(e); handleInput(e); }}
     {placeholder}
     {disabled}
     rows="1"

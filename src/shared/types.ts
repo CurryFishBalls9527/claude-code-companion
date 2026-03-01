@@ -272,10 +272,31 @@ export type StreamEvent =
   | { type: 'tool'; subtype: 'result'; tool_id: string; output: string; is_error: boolean };
 
 // Client → server
-export interface ChatCreateMsg { type: 'chat-create'; projectPath: string; model?: string; resumeSessionId?: string; permissionMode?: string; }
-export interface ChatSendMsg   { type: 'chat-send';   sessionId: string; text: string; }
-export interface ChatApproveMsg{ type: 'chat-approve'; sessionId: string; toolId: string; approved: boolean; }
-export interface ChatEndMsg    { type: 'chat-end';    sessionId: string; }
+export interface ChatCreateMsg {
+  type: 'chat-create';
+  projectPath: string;
+  model?: string;
+  resumeSessionId?: string;
+  permissionMode?: string;
+  // Advanced settings
+  effort?: string;
+  thinking?: { type: string; budgetTokens?: number };
+  maxTurns?: number;
+  maxBudgetUsd?: number;
+  appendSystemPrompt?: string;
+  allowedTools?: string[];
+  disallowedTools?: string[];
+  customAgents?: Record<string, { description: string }>;
+  mcpServers?: Record<string, { type: string; command?: string; args?: string[]; url?: string; env?: Record<string, string> }>;
+  enableFileCheckpointing?: boolean;
+}
+export interface ChatSendMsg      { type: 'chat-send';      sessionId: string; text: string; }
+export interface ChatApproveMsg   { type: 'chat-approve';   sessionId: string; toolId: string; approved: boolean; }
+export interface ChatEndMsg       { type: 'chat-end';       sessionId: string; }
+export interface ChatSettingsMsg  { type: 'chat-settings';  sessionId: string; permissionMode?: string; model?: string; }
+export interface ChatInterruptMsg { type: 'chat-interrupt'; sessionId: string; }
+export interface ChatMcpMsg      { type: 'chat-mcp';       sessionId: string; action: 'toggle' | 'reconnect' | 'status'; serverName: string; enabled?: boolean; }
+export interface ChatRewindMsg   { type: 'chat-rewind';    sessionId: string; messageId: string; dryRun?: boolean; }
 
 // Server → client
 export interface ChatCreatedMsg      { type: 'chat-created';          sessionId: string; }

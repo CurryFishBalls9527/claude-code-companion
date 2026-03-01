@@ -31,6 +31,8 @@ interface ActiveChat {
   abortController: AbortController;
   // Track whether we've received stream deltas for current turn
   hasStreamedDeltas: boolean;
+  // Reference to the SDK Query object for mid-session controls
+  queryRef: any | null;
 }
 
 interface SDKUserMsg {
@@ -56,6 +58,16 @@ export class SessionManager {
     model?: string;
     resumeSessionId?: string;
     permissionMode?: string;
+    effort?: string;
+    thinking?: { type: string; budgetTokens?: number };
+    maxTurns?: number;
+    maxBudgetUsd?: number;
+    appendSystemPrompt?: string;
+    allowedTools?: string[];
+    disallowedTools?: string[];
+    customAgents?: Record<string, { description: string }>;
+    mcpServers?: Record<string, any>;
+    enableFileCheckpointing?: boolean;
   }): string {
     const sessionId = randomUUID();
     const abortController = new AbortController();
@@ -65,7 +77,7 @@ export class SessionManager {
     if (!existsSync(cwd)) {
       throw new Error(`Project path does not exist: ${cwd}`);
     }
-    console.log(`[SessionManager] Starting session ${sessionId.slice(0, 8)} in ${cwd}`);
+    console.log(`[SessionManager] Starting session ${sessionId.slice(0, 8)} in ${cwd}${options.resumeSessionId ? ` (resuming from ${options.resumeSessionId.slice(0, 8)})` : ''}`);
 
     // Create a message queue for the async generator
     let pushMessage: ((msg: SDKUserMsg) => void) | null = null;
@@ -73,11 +85,13 @@ export class SessionManager {
 
     const chat: ActiveChat = {
       status: 'starting',
+      claudeSessionId: options.resumeSessionId, // Pre-set from resume ID (init event may not fire during resume)
       pendingApprovals: new Map(),
       pushMessage: null,
       endGenerator: null,
       abortController,
       hasStreamedDeltas: false,
+      queryRef: null,
     };
     this.chats.set(sessionId, chat);
 
@@ -147,6 +161,24 @@ export class SessionManager {
       }
     }
 
+    // Advanced options
+    if (options.effort) queryOptions.effort = options.effort;
+    if (options.thinking) queryOptions.thinking = options.thinking;
+    if (options.maxTurns) queryOptions.maxTurns = options.maxTurns;
+    if (options.maxBudgetUsd) queryOptions.maxBudgetUsd = options.maxBudgetUsd;
+    if (options.allowedTools) queryOptions.allowedTools = options.allowedTools;
+    if (options.disallowedTools) queryOptions.disallowedTools = options.disallowedTools;
+    if (options.appendSystemPrompt) {
+      queryOptions.systemPrompt = {
+        type: 'preset',
+        preset: 'claude_code',
+        append: options.appendSystemPrompt,
+      };
+    }
+    if (options.customAgents) queryOptions.agents = options.customAgents;
+    if (options.mcpServers) queryOptions.mcpServers = options.mcpServers;
+    if (options.enableFileCheckpointing) queryOptions.enableFileCheckpointing = true;
+
     // canUseTool callback — surfaces tool approval requests to the browser
     queryOptions.canUseTool = async (
       toolName: string,
@@ -198,6 +230,9 @@ export class SessionManager {
         options: options as any,
       });
 
+      // Store query ref for mid-session controls
+      chat.queryRef = q;
+
       for await (const message of q) {
         if (chat.status === 'ended') break;
 
@@ -208,6 +243,9 @@ export class SessionManager {
           if (event.type === 'system' && 'subtype' in event && event.subtype === 'init') {
             chat.claudeSessionId = event.session_id;
             chat.status = 'active';
+
+            // Fetch available commands, agents, models from the SDK
+            this.fetchCapabilities(sessionId, q).catch(() => {});
           }
 
           this.notify(sessionId, { type: 'chat-event', sessionId, event });
@@ -330,7 +368,8 @@ export class SessionManager {
         session_id: msg.session_id ?? '',
         uuid: msg.uuid,
         parent_tool_use_id: msg.parent_tool_use_id ?? undefined,
-      };
+        isReplay: msg.isReplay ?? false,
+      } as any;
     }
 
     // User message (tool results)
@@ -339,7 +378,8 @@ export class SessionManager {
         type: 'user',
         message: msg.message ?? { role: 'user', content: '' },
         session_id: msg.session_id ?? '',
-      };
+        isReplay: msg.isReplay ?? false,
+      } as any;
     }
 
     // Result message
@@ -392,6 +432,71 @@ export class SessionManager {
     }
 
     return null;
+  }
+
+  // ── Capabilities fetch ───────────────────────────────────────────────────
+  private async fetchCapabilities(sessionId: string, q: any): Promise<void> {
+    try {
+      const results = await Promise.allSettled([
+        q.supportedCommands?.() ?? Promise.resolve([]),
+        q.supportedAgents?.() ?? Promise.resolve([]),
+        q.supportedModels?.() ?? Promise.resolve([]),
+      ]);
+      const commands = results[0].status === 'fulfilled' ? results[0].value : [];
+      const agents = results[1].status === 'fulfilled' ? results[1].value : [];
+      const models = results[2].status === 'fulfilled' ? results[2].value : [];
+
+      this.notify(sessionId, {
+        type: 'chat-event',
+        sessionId,
+        event: {
+          type: 'system',
+          subtype: 'capabilities',
+          commands,
+          agents,
+          models,
+        } as any,
+      });
+    } catch (e) {
+      console.error('[SessionManager] fetchCapabilities:', e);
+    }
+  }
+
+  // ── Mid-session controls ──────────────────────────────────────────────────
+  async setPermissionMode(sessionId: string, mode: string): Promise<void> {
+    const chat = this.chats.get(sessionId);
+    if (!chat?.queryRef) return;
+    try { await chat.queryRef.setPermissionMode(mode); } catch (e) { console.error('[SessionManager] setPermissionMode:', e); }
+  }
+
+  async setModel(sessionId: string, model: string): Promise<void> {
+    const chat = this.chats.get(sessionId);
+    if (!chat?.queryRef) return;
+    try { await chat.queryRef.setModel(model); } catch (e) { console.error('[SessionManager] setModel:', e); }
+  }
+
+  async interrupt(sessionId: string): Promise<void> {
+    const chat = this.chats.get(sessionId);
+    if (!chat?.queryRef) return;
+    try { await chat.queryRef.interrupt(); } catch (e) { console.error('[SessionManager] interrupt:', e); }
+  }
+
+  async toggleMcpServer(sessionId: string, serverName: string, enabled: boolean): Promise<void> {
+    const chat = this.chats.get(sessionId);
+    if (!chat?.queryRef) return;
+    try { await chat.queryRef.toggleMcpServer?.(serverName, enabled); } catch (e) { console.error('[SessionManager] toggleMcpServer:', e); }
+  }
+
+  async reconnectMcpServer(sessionId: string, serverName: string): Promise<void> {
+    const chat = this.chats.get(sessionId);
+    if (!chat?.queryRef) return;
+    try { await chat.queryRef.reconnectMcpServer?.(serverName); } catch (e) { console.error('[SessionManager] reconnectMcpServer:', e); }
+  }
+
+  async rewindFiles(sessionId: string, messageId: string, dryRun?: boolean): Promise<any> {
+    const chat = this.chats.get(sessionId);
+    if (!chat?.queryRef) return null;
+    try { return await chat.queryRef.rewindFiles?.(messageId, { dryRun }); } catch (e) { console.error('[SessionManager] rewindFiles:', e); return null; }
   }
 
   sendMessage(sessionId: string, text: string): void {

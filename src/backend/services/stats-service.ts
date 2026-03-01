@@ -84,7 +84,18 @@ export async function getDashboardStats(): Promise<DashboardStats> {
   const modelUsage = buildModelUsage(summaries);
 
   // Hour counts (from cache or from session timestamps)
-  const hourCounts = cache?.hourCounts ?? buildHourCounts(summaries);
+  // Cache may store hourCounts as a sparse object {hour: count} — normalize to 24-element array
+  const rawHourCounts = cache?.hourCounts ?? buildHourCounts(summaries);
+  const hourCounts: number[] = Array.isArray(rawHourCounts)
+    ? rawHourCounts
+    : (() => {
+        const arr = new Array(24).fill(0);
+        for (const [h, c] of Object.entries(rawHourCounts as Record<string, number>)) {
+          const idx = parseInt(h, 10);
+          if (idx >= 0 && idx < 24) arr[idx] = c;
+        }
+        return arr;
+      })();
 
   return {
     totalSessions,
@@ -146,8 +157,9 @@ function buildModelUsage(summaries: SessionSummary[]): ModelUsage[] {
 function buildHourCounts(summaries: SessionSummary[]): number[] {
   const counts = new Array(24).fill(0);
   for (const s of summaries) {
-    if (s.lastTimestamp) {
-      const hour = new Date(s.lastTimestamp).getHours();
+    const ts = s.lastTimestamp || s.firstTimestamp;
+    if (ts) {
+      const hour = new Date(ts).getHours();
       counts[hour]++;
     }
   }

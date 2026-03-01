@@ -166,12 +166,6 @@
           >
             Resume in Chat
           </a>
-          <a
-            href="/diffs/{session.id}"
-            class="px-3 py-1 bg-gray-800 border border-gray-700 rounded text-xs hover:bg-gray-700"
-          >
-            View Diffs
-          </a>
           <!-- Export -->
           <a
             href={api.getExportUrl(session.id, 'markdown')}
@@ -276,8 +270,16 @@
     <!-- Messages -->
     <div class="flex-1 space-y-3 overflow-auto pb-4">
       {#each visibleMessages as message (message.uuid)}
-        <div class="animate-in fade-in duration-200">
+        <div class="animate-in fade-in duration-200 group relative">
           <MessageCard {message} />
+          {#if message.role === 'assistant' && session}
+            <a
+              href="/chat?resume={session.id}&project={encodeURIComponent(session.projectPath)}"
+              class="absolute top-2 right-2 opacity-0 group-hover:opacity-100 px-2 py-0.5 bg-gray-700/80 border border-gray-600 rounded text-[10px] text-gray-400 hover:text-green-300 hover:border-green-600/40 transition-all"
+            >
+              Resume from here
+            </a>
+          {/if}
         </div>
       {/each}
     </div>

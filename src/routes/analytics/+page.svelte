@@ -47,6 +47,20 @@
     }
   }
 
+  // Normalize hourCounts — API may return sparse object {hour: count} instead of 24-element array
+  const hourCounts = $derived.by(() => {
+    const raw = stats?.hourCounts;
+    if (!raw) return new Array(24).fill(0);
+    if (Array.isArray(raw) && raw.length === 24) return raw;
+    const arr = new Array(24).fill(0);
+    if (Array.isArray(raw)) return raw;
+    for (const [h, c] of Object.entries(raw as Record<string, number>)) {
+      const idx = parseInt(h, 10);
+      if (idx >= 0 && idx < 24) arr[idx] = c;
+    }
+    return arr;
+  });
+
   const maxToolMs = $derived(Math.max(...toolTiming.map((t) => t.avgMs), 1));
 
   function fmtMs(ms: number): string {
@@ -68,12 +82,12 @@
       <div class="bg-gray-900 border border-gray-800 rounded-xl p-4">
         <h2 class="text-sm font-semibold text-gray-300 mb-3">Activity by Hour</h2>
         <div class="flex items-end gap-1 h-24">
-          {#each stats.hourCounts as count, hour}
-            {@const max = Math.max(...stats.hourCounts, 1)}
+          {#each hourCounts as count, hour}
+            {@const max = Math.max(...hourCounts, 1)}
             <div class="flex-1 flex flex-col items-center gap-1">
               <div
-                class="w-full bg-blue-600/60 hover:bg-blue-500/80 rounded-sm transition-colors"
-                style:height="{Math.max(2, (count / max) * 80)}px"
+                class="w-full rounded-sm transition-colors {count > 0 ? 'bg-blue-600/60 hover:bg-blue-500/80' : 'bg-gray-800/40'}"
+                style:height="{count > 0 ? Math.max(8, (count / max) * 80) : 2}px"
                 title="{hour}:00 - {count} sessions"
               ></div>
               {#if hour % 6 === 0}

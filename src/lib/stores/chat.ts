@@ -16,6 +16,19 @@ export interface ChatMessage {
   timestamp: string;
   usage?: { input_tokens: number; output_tokens: number };
   cost?: number;
+  isReplay?: boolean;
+  uuid?: string;
+}
+
+export interface SlashCommand {
+  name: string;
+  description?: string;
+  isBuiltIn?: boolean;
+}
+
+export interface AgentInfo {
+  name: string;
+  description?: string;
 }
 
 export interface ChatState {
@@ -23,6 +36,7 @@ export interface ChatState {
   claudeSessionId: string | null;  // Claude's internal session ID (for resume)
   projectPath: string;
   model: string;
+  permissionMode: string;
   status: 'idle' | 'creating' | 'active' | 'waiting_approval' | 'ended';
   messages: ChatMessage[];
   streaming: StreamingState;
@@ -30,6 +44,10 @@ export interface ChatState {
   pendingApproval: null | { toolId: string; toolName: string; input: Record<string, unknown> };
   error: string | null;
   promptHistory: string[];
+  // Capabilities from SDK
+  availableCommands: SlashCommand[];
+  availableAgents: AgentInfo[];
+  availableModels: string[];
 }
 
 const DEFAULT_STATE: ChatState = {
@@ -37,6 +55,7 @@ const DEFAULT_STATE: ChatState = {
   claudeSessionId: null,
   projectPath: '',
   model: 'claude-sonnet-4-6',
+  permissionMode: 'default',
   status: 'idle',
   messages: [],
   streaming: { thinking: '', text: '', toolCalls: [] },
@@ -44,6 +63,9 @@ const DEFAULT_STATE: ChatState = {
   pendingApproval: null,
   error: null,
   promptHistory: [],
+  availableCommands: [],
+  availableAgents: [],
+  availableModels: [],
 };
 
 export const chatState = writable<ChatState>({ ...DEFAULT_STATE });
@@ -56,10 +78,22 @@ export function handleStreamEvent(event: StreamEvent): void {
   chatState.update((s) => {
     const next = { ...s };
 
-    if (event.type === 'system' && event.subtype === 'init') {
-      next.claudeSessionId = event.session_id;
+    // Handle system events (init + capabilities) — use 'as any' since capabilities
+    // is a custom subtype not in the StreamEvent union
+    const anyEvent = event as any;
+    if (anyEvent.type === 'system' && anyEvent.subtype === 'init') {
+      next.claudeSessionId = anyEvent.session_id;
       next.status = 'active';
+      if (anyEvent.model) next.model = anyEvent.model;
+      if (anyEvent.permissionMode) next.permissionMode = anyEvent.permissionMode;
       // Don't reset streaming state — init arrives after first message
+      return next;
+    }
+
+    if (anyEvent.type === 'system' && anyEvent.subtype === 'capabilities') {
+      next.availableCommands = anyEvent.commands ?? [];
+      next.availableAgents = anyEvent.agents ?? [];
+      next.availableModels = anyEvent.models ?? [];
       return next;
     }
 
@@ -89,6 +123,8 @@ export function handleStreamEvent(event: StreamEvent): void {
           toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
           timestamp: new Date().toISOString(),
           usage: msg.usage,
+          isReplay: (event as any).isReplay ?? false,
+          uuid: (event as any).uuid,
         };
         next.messages = [...next.messages, chatMsg];
         return next;
@@ -185,16 +221,34 @@ export function handleStreamEvent(event: StreamEvent): void {
   });
 }
 
-export function createChatSession(projectPath: string, model?: string, resumeSessionId?: string, permissionMode?: string): void {
+export function createChatSession(options: {
+  projectPath: string;
+  model?: string;
+  resumeSessionId?: string;
+  permissionMode?: string;
+  effort?: string;
+  thinking?: { type: string; budgetTokens?: number };
+  maxTurns?: number;
+  maxBudgetUsd?: number;
+  appendSystemPrompt?: string;
+  allowedTools?: string[];
+  disallowedTools?: string[];
+  customAgents?: Record<string, { description: string }>;
+  mcpServers?: Record<string, { type: string; command?: string; args?: string[]; url?: string; env?: Record<string, string> }>;
+  enableFileCheckpointing?: boolean;
+}): void {
   const ws = getWsClient();
   chatState.update((s) => ({
     ...DEFAULT_STATE,
-    projectPath,
-    model: model ?? s.model,
+    projectPath: options.projectPath,
+    model: options.model ?? s.model,
+    permissionMode: options.permissionMode ?? s.permissionMode,
     status: 'creating',
     promptHistory: s.promptHistory,
+    // Pre-set claudeSessionId from resumeSessionId (init event may not fire during resume)
+    claudeSessionId: options.resumeSessionId ?? null,
   }));
-  ws.createChatSession(projectPath, model, resumeSessionId, permissionMode);
+  ws.createChatSession(options);
 }
 
 export function sendChatMessage(text: string): void {

@@ -123,8 +123,35 @@ export class LiveSessionClient {
   }
 
   // ── Chat session controls ────────────────────────────────────────────────────
-  createChatSession(projectPath: string, model?: string, resumeSessionId?: string, permissionMode?: string): void {
-    this.send({ type: 'chat-create', projectPath, model, resumeSessionId, permissionMode });
+  createChatSession(options: {
+    projectPath: string;
+    model?: string;
+    resumeSessionId?: string;
+    permissionMode?: string;
+    effort?: string;
+    thinking?: { type: string; budgetTokens?: number };
+    maxTurns?: number;
+    maxBudgetUsd?: number;
+    appendSystemPrompt?: string;
+    allowedTools?: string[];
+    disallowedTools?: string[];
+    customAgents?: Record<string, { description: string }>;
+    mcpServers?: Record<string, { type: string; command?: string; args?: string[]; url?: string; env?: Record<string, string> }>;
+    enableFileCheckpointing?: boolean;
+  }): void {
+    this.send({ type: 'chat-create', ...options });
+  }
+
+  updateSessionSettings(sessionId: string, settings: { permissionMode?: string; model?: string }): void {
+    this.send({ type: 'chat-settings', sessionId, ...settings });
+  }
+
+  interruptSession(sessionId: string): void {
+    this.send({ type: 'chat-interrupt', sessionId });
+  }
+
+  rewindSession(sessionId: string, messageId: string, dryRun?: boolean): void {
+    this.send({ type: 'chat-rewind', sessionId, messageId, dryRun });
   }
 
   sendChatMessage(sessionId: string, text: string): void {

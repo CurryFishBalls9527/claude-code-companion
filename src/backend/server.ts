@@ -12,6 +12,7 @@ import { chatRouter, setChatSessionManager } from './routes/chat.js';
 import { startFileWatcher, subscribeToSession, findMostRecentSessionFile } from './services/file-watcher.js';
 import { findSessionById } from './services/claude-data.js';
 import { SessionManager } from './services/session-manager.js';
+import { loadMcpServers, saveMcpServers } from './services/mcp-config.js';
 import { BACKEND_PORT } from '../shared/constants.js';
 
 const app = express();
@@ -41,6 +42,15 @@ app.use('/api/search', searchRouter);
 app.use('/api/meta', metaRouter);
 app.use('/api/files', filesRouter);
 app.use('/api/chat', chatRouter);
+
+// MCP server configuration
+app.get('/api/mcp/servers', (_req, res) => {
+  res.json(loadMcpServers());
+});
+app.put('/api/mcp/servers', (req, res) => {
+  saveMcpServers(req.body);
+  res.json({ ok: true });
+});
 
 // Active session endpoint (for live monitor)
 app.get('/api/live/active', async (req, res) => {
@@ -136,14 +146,22 @@ wss.on('connection', (ws) => {
 
       // ── Chat (Agent SDK) ──
       if (msg.type === 'chat-create') {
-        const { projectPath, model, resumeSessionId, permissionMode } = msg;
+        const { projectPath, model, resumeSessionId, permissionMode,
+                effort, thinking, maxTurns, maxBudgetUsd, appendSystemPrompt,
+                allowedTools, disallowedTools, customAgents, mcpServers,
+                enableFileCheckpointing } = msg;
         if (!projectPath) {
           ws.send(JSON.stringify({ type: 'error', message: 'projectPath required' }));
           return;
         }
         try {
           console.log(`[WS] chat-create: projectPath=${projectPath} model=${model} permissionMode=${permissionMode}`);
-          const sessionId = sessionManager.createSession({ projectPath, model, resumeSessionId, permissionMode });
+          const sessionId = sessionManager.createSession({
+            projectPath, model, resumeSessionId, permissionMode,
+            effort, thinking, maxTurns, maxBudgetUsd, appendSystemPrompt,
+            allowedTools, disallowedTools, customAgents, mcpServers,
+            enableFileCheckpointing,
+          });
           // Subscribe this WS to events from this chat session
           if (!chatSubscriptions.has(sessionId)) chatSubscriptions.set(sessionId, new Set());
           chatSubscriptions.get(sessionId)!.add(ws);
@@ -167,6 +185,28 @@ wss.on('connection', (ws) => {
       if (msg.type === 'chat-end') {
         sessionManager.endSession(msg.sessionId);
         chatSubscriptions.delete(msg.sessionId);
+      }
+
+      if (msg.type === 'chat-settings') {
+        if (msg.permissionMode) await sessionManager.setPermissionMode(msg.sessionId, msg.permissionMode);
+        if (msg.model) await sessionManager.setModel(msg.sessionId, msg.model);
+      }
+
+      if (msg.type === 'chat-interrupt') {
+        await sessionManager.interrupt(msg.sessionId);
+      }
+
+      if (msg.type === 'chat-rewind') {
+        const result = await sessionManager.rewindFiles(msg.sessionId, msg.messageId, msg.dryRun);
+        ws.send(JSON.stringify({ type: 'chat-rewind-result', sessionId: msg.sessionId, result }));
+      }
+
+      if (msg.type === 'chat-mcp') {
+        if (msg.action === 'toggle' && msg.serverName) {
+          await sessionManager.toggleMcpServer(msg.sessionId, msg.serverName, msg.enabled ?? true);
+        } else if (msg.action === 'reconnect' && msg.serverName) {
+          await sessionManager.reconnectMcpServer(msg.sessionId, msg.serverName);
+        }
       }
 
     } catch (e) {

@@ -17,8 +17,7 @@
   const staticCommands: Command[] = [
     { label: 'Dashboard', description: 'Go to home dashboard', icon: '🏠', action: () => goto('/') },
     { label: 'Sessions', description: 'Browse all sessions', icon: '📋', action: () => goto('/sessions') },
-    { label: 'Diffs', description: 'Review file changes', icon: '📝', action: () => goto('/diffs') },
-    { label: 'Analytics', description: 'Usage analytics', icon: '📊', action: () => goto('/analytics') },
+{ label: 'Analytics', description: 'Usage analytics', icon: '📊', action: () => goto('/analytics') },
     { label: 'Live', description: 'Live session monitor', icon: '⚡', action: () => goto('/live') },
     { label: 'Search', description: 'Search all sessions', icon: '🔍', action: () => goto('/search') },
     { label: 'Files', description: 'File edit timeline', icon: '📁', action: () => goto('/files') },

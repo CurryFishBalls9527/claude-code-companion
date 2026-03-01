@@ -138,4 +138,12 @@ export const api = {
   getFileTimeline(filePath: string): Promise<FileEdit[]> {
     return get(`/files/timeline?path=${encodeURIComponent(filePath)}`);
   },
+
+  // MCP servers
+  getMcpServers(): Promise<{ name: string; type: string; command?: string; args?: string[]; url?: string; env?: Record<string, string>; enabled: boolean }[]> {
+    return get('/mcp/servers');
+  },
+  saveMcpServers(servers: { name: string; type: string; command?: string; args?: string[]; url?: string; env?: Record<string, string>; enabled: boolean }[]): Promise<{ ok: boolean }> {
+    return put('/mcp/servers', servers);
+  },
 };
