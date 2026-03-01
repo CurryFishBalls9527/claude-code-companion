@@ -8,25 +8,39 @@
 
   onMount(async () => {
     const { Chart, registerables } = await import('chart.js');
-    const { default: adapter } = await import('chartjs-adapter-date-fns');
+    await import('chartjs-adapter-date-fns');
     Chart.register(...registerables);
 
-    // Take last 30 days
     const recent = activity.slice(-30);
+    const rawMax = Math.max(...recent.map((d) => d.tokenCount), 0);
+
+    // Pick unit: show raw numbers if small, k if medium, M if large
+    let unitLabel: string;
+    let divisor: number;
+    if (rawMax >= 10_000_000) {
+      unitLabel = 'M';
+      divisor = 1_000_000;
+    } else if (rawMax >= 10_000) {
+      unitLabel = 'k';
+      divisor = 1_000;
+    } else {
+      unitLabel = '';
+      divisor = 1;
+    }
+
+    const data = recent.map((d) => d.tokenCount / divisor);
 
     chart = new Chart(canvas, {
-      type: 'line',
+      type: 'bar',
       data: {
         labels: recent.map((d) => d.date),
         datasets: [
           {
-            label: 'Tokens',
-            data: recent.map((d) => d.tokenCount),
-            borderColor: '#3b82f6',
-            backgroundColor: '#3b82f610',
-            fill: true,
-            tension: 0.3,
-            pointRadius: 2,
+            label: `Tokens${unitLabel ? ` (${unitLabel})` : ''}`,
+            data,
+            backgroundColor: '#3b82f6',
+            borderRadius: 2,
+            barPercentage: 0.6,
           },
         ],
       },
@@ -34,28 +48,27 @@
         responsive: true,
         maintainAspectRatio: false,
         plugins: {
-          legend: { labels: { color: '#9ca3af', font: { size: 11 } } },
+          legend: { display: false },
         },
         scales: {
           x: {
             type: 'time',
             time: { unit: 'day' },
-            ticks: { color: '#6b7280', maxTicksLimit: 8 },
-            grid: { color: '#1f2937' },
+            ticks: { color: '#6b7280', maxTicksLimit: 7, font: { size: 10 } },
+            grid: { display: false },
           },
           y: {
             beginAtZero: true,
             ticks: {
               color: '#6b7280',
-              maxTicksLimit: 6,
+              maxTicksLimit: 5,
+              font: { size: 10 },
               callback: (value: number | string) => {
-                const num = typeof value === 'number' ? value : parseFloat(String(value));
-                if (num >= 1_000_000) return (num / 1_000_000).toFixed(1) + 'M';
-                if (num >= 1_000) return (num / 1_000).toFixed(num >= 10_000 ? 0 : 1) + 'k';
-                return num.toString();
+                const n = typeof value === 'number' ? value : parseFloat(String(value));
+                return `${Number.isInteger(n) ? n : n.toFixed(1)}${unitLabel}`;
               },
             },
-            grid: { color: '#1f2937' },
+            grid: { color: '#1f293740' },
           },
         },
       },
@@ -67,4 +80,6 @@
   });
 </script>
 
-<canvas bind:this={canvas} class="w-full" style:height="200px"></canvas>
+<div class="w-full" style="height: 160px;">
+  <canvas bind:this={canvas} class="w-full h-full"></canvas>
+</div>

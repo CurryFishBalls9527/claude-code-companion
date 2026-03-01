@@ -18,6 +18,9 @@
     "postinstall": "chmod +x node_modules/node-pty/prebuilds/darwin-arm64/spawn-helper 2>/dev/null || true"
   },
   "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.2.63",
+    "@anthropic-ai/sdk": "^0.78.0",
+    "@modelcontextprotocol/sdk": "^1.27.1",
     "@tauri-apps/api": "^2.10.1",
     "@xterm/addon-fit": "^0.10.0",
     "chart.js": "^4.4.7",

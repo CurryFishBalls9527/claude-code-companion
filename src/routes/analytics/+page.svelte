@@ -2,7 +2,6 @@
   import { onMount } from 'svelte';
   import { api } from '$lib/api/client.js';
   import type { DashboardStats, ToolTiming, CostBudget } from '$shared/types.js';
-  import { allMeta, loadAllMeta } from '$lib/stores/meta.js';
   import LoadingSpinner from '$lib/components/shared/LoadingSpinner.svelte';
 
   let stats = $state<DashboardStats | null>(null);
@@ -141,7 +140,7 @@
       <div class="bg-gray-900 border border-gray-800 rounded-xl p-4">
         <h2 class="text-sm font-semibold text-gray-300 mb-4">Tool Performance (avg response time)</h2>
         <div class="space-y-2.5">
-          {#each toolTiming.sort((a, b) => b.avgMs - a.avgMs) as t}
+          {#each [...toolTiming].sort((a, b) => b.avgMs - a.avgMs) as t}
             <div class="flex items-center gap-3">
               <div class="w-32 shrink-0 text-xs font-mono text-gray-400 truncate text-right">{t.toolName}</div>
               <div class="flex-1 h-5 bg-gray-800 rounded overflow-hidden">

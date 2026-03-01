@@ -134,7 +134,7 @@ wss.on('connection', (ws) => {
         ws.send(JSON.stringify({ type: 'active-session', sessionId }));
       }
 
-      // ── New: chat / PTY ──
+      // ── Chat (Agent SDK) ──
       if (msg.type === 'chat-create') {
         const { projectPath, model, resumeSessionId, permissionMode } = msg;
         if (!projectPath) {
@@ -142,13 +142,16 @@ wss.on('connection', (ws) => {
           return;
         }
         try {
+          console.log(`[WS] chat-create: projectPath=${projectPath} model=${model} permissionMode=${permissionMode}`);
           const sessionId = sessionManager.createSession({ projectPath, model, resumeSessionId, permissionMode });
           // Subscribe this WS to events from this chat session
           if (!chatSubscriptions.has(sessionId)) chatSubscriptions.set(sessionId, new Set());
           chatSubscriptions.get(sessionId)!.add(ws);
           wsChatSubs.get(ws)!.add(sessionId);
+          console.log(`[WS] Sending chat-created for ${sessionId.slice(0, 8)}`);
           ws.send(JSON.stringify({ type: 'chat-created', sessionId }));
         } catch (e) {
+          console.error(`[WS] chat-create FAILED:`, e instanceof Error ? e.message : String(e));
           ws.send(JSON.stringify({ type: 'error', message: e instanceof Error ? e.message : String(e) }));
         }
       }

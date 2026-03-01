@@ -31,6 +31,7 @@ export class LiveSessionClient {
   private toolApprovalCbs: ToolApprovalCallback[] = [];
   private chatEndCbs: ChatEndCallback[] = [];
   private chatCreatedCbs: ChatCreatedCallback[] = [];
+  private errorCbs: ((message: string) => void)[] = [];
 
   constructor(url?: string) {
     const isTauri = typeof window !== 'undefined' && '__TAURI__' in window;
@@ -83,6 +84,9 @@ export class LiveSessionClient {
         if (msg.type === 'session-end') {
           const m = msg as ChatSessionEndMsg;
           for (const cb of this.chatEndCbs) cb(m.sessionId, m.exitCode);
+        }
+        if (msg.type === 'error') {
+          for (const cb of this.errorCbs) cb(msg.message ?? 'Unknown error');
         }
       } catch {
         // Ignore parse errors
@@ -159,6 +163,11 @@ export class LiveSessionClient {
   onChatSessionEnd(cb: ChatEndCallback): () => void {
     this.chatEndCbs.push(cb);
     return () => { this.chatEndCbs = this.chatEndCbs.filter((c) => c !== cb); };
+  }
+
+  onError(cb: (message: string) => void): () => void {
+    this.errorCbs.push(cb);
+    return () => { this.errorCbs = this.errorCbs.filter((c) => c !== cb); };
   }
 
   // ── Internal ─────────────────────────────────────────────────────────────────

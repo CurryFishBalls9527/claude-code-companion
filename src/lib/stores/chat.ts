@@ -36,7 +36,7 @@ const DEFAULT_STATE: ChatState = {
   sessionId: null,
   claudeSessionId: null,
   projectPath: '',
-  model: 'claude-sonnet-4-5',
+  model: 'claude-sonnet-4-6',
   status: 'idle',
   messages: [],
   streaming: { thinking: '', text: '', toolCalls: [] },

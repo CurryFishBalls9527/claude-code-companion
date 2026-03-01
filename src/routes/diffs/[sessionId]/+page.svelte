@@ -42,9 +42,9 @@
   const totalRemoved = $derived(diffs.reduce((s, d) => s + d.linesRemoved, 0));
 </script>
 
-<div class="flex h-full gap-4">
+<div class="flex gap-4">
   {#if loading}
-    <div class="flex-1 flex items-center justify-center">
+    <div class="flex-1 flex items-center justify-center py-20">
       <LoadingSpinner />
     </div>
   {:else if error}
@@ -54,33 +54,35 @@
       <EmptyState message="No file changes in this session" />
     </div>
   {:else}
-    <!-- File sidebar -->
-    <div class="w-64 shrink-0 bg-gray-900 border border-gray-800 rounded-lg overflow-auto">
-      <div class="p-3 border-b border-gray-800">
-        <div class="text-xs text-gray-400 font-semibold">Changed Files</div>
-        <div class="text-xs text-gray-600 mt-1">
-          <span class="text-green-500">+{totalAdded}</span>
-          <span class="text-red-400 ml-1">-{totalRemoved}</span>
+    <!-- File sidebar — sticky so it stays visible while scrolling diffs -->
+    <div class="w-64 shrink-0 self-start sticky top-0">
+      <div class="bg-gray-900 border border-gray-800 rounded-lg overflow-auto max-h-[80vh]">
+        <div class="p-3 border-b border-gray-800">
+          <div class="text-xs text-gray-400 font-semibold">Changed Files</div>
+          <div class="text-xs text-gray-600 mt-1">
+            <span class="text-green-500">+{totalAdded}</span>
+            <span class="text-red-400 ml-1">-{totalRemoved}</span>
+          </div>
         </div>
-      </div>
-      <div class="py-1">
-        {#each fileGroups as [filePath, fileDiffs]}
-          <button
-            onclick={() => (selectedFile = filePath)}
-            class="w-full text-left px-3 py-2 text-xs font-mono truncate hover:bg-gray-800 transition-colors {selectedFile === filePath ? 'bg-blue-600/20 text-blue-300' : 'text-gray-400'}"
-          >
-            <div class="truncate">{filePath.split('/').pop()}</div>
-            <div class="text-gray-600 truncate text-[10px]">{filePath}</div>
-            <div class="text-[10px] mt-0.5">
-              <span class="text-yellow-600">{fileDiffs.length} change{fileDiffs.length > 1 ? 's' : ''}</span>
-            </div>
-          </button>
-        {/each}
+        <div class="py-1">
+          {#each fileGroups as [filePath, fileDiffs]}
+            <button
+              onclick={() => (selectedFile = filePath)}
+              class="w-full text-left px-3 py-2 text-xs font-mono truncate hover:bg-gray-800 transition-colors {selectedFile === filePath ? 'bg-blue-600/20 text-blue-300' : 'text-gray-400'}"
+            >
+              <div class="truncate">{filePath.split('/').pop()}</div>
+              <div class="text-gray-600 truncate text-[10px]">{filePath}</div>
+              <div class="text-[10px] mt-0.5">
+                <span class="text-yellow-600">{fileDiffs.length} change{fileDiffs.length > 1 ? 's' : ''}</span>
+              </div>
+            </button>
+          {/each}
+        </div>
       </div>
     </div>
 
-    <!-- Diff content -->
-    <div class="flex-1 overflow-auto space-y-4 min-w-0">
+    <!-- Diff content — no overflow-auto, flows naturally -->
+    <div class="flex-1 space-y-4 min-w-0">
       <div class="flex items-center gap-3">
         <h2 class="text-sm font-semibold text-gray-200 font-mono truncate">
           {selectedFile ?? ''}
@@ -94,7 +96,7 @@
       </div>
 
       {#each selectedDiffs as diff (diff.toolCallId)}
-        <div class="bg-gray-900 border border-gray-800 rounded-lg p-4">
+        <div class="bg-gray-900 border border-gray-800 rounded-lg p-4 overflow-hidden">
           <DiffViewer {diff} />
         </div>
       {/each}

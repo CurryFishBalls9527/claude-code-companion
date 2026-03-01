@@ -45,7 +45,9 @@
 </script>
 
 {#if usage.length > 0}
-  <canvas bind:this={canvas} class="w-full" style:height="180px"></canvas>
+  <div class="w-full" style="height: 160px;">
+    <canvas bind:this={canvas} class="w-full h-full"></canvas>
+  </div>
 {:else}
   <div class="flex items-center justify-center h-32 text-gray-600 text-sm">No model data</div>
 {/if}
