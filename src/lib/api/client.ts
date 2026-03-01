@@ -29,6 +29,19 @@ async function get<T>(path: string): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+async function post<T>(path: string, body: unknown): Promise<T> {
+  const res = await fetch(`${BASE}${path}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error((err as { error: string }).error ?? `HTTP ${res.status}`);
+  }
+  return res.json() as Promise<T>;
+}
+
 async function put<T>(path: string, body: unknown): Promise<T> {
   const res = await fetch(`${BASE}${path}`, {
     method: 'PUT',
@@ -145,5 +158,16 @@ export const api = {
   },
   saveMcpServers(servers: { name: string; type: string; command?: string; args?: string[]; url?: string; env?: Record<string, string>; enabled: boolean }[]): Promise<{ ok: boolean }> {
     return put('/mcp/servers', servers);
+  },
+
+  // Telegram
+  getTelegramConfig(): Promise<{ botToken: string; allowedUserIds: number[]; enabled: boolean; tokenSet: boolean }> {
+    return get('/telegram/config');
+  },
+  saveTelegramConfig(config: { botToken?: string; allowedUserIds?: number[]; enabled?: boolean }): Promise<{ botToken: string; allowedUserIds: number[]; enabled: boolean; tokenSet: boolean }> {
+    return put('/telegram/config', config);
+  },
+  testTelegram(chatId: number): Promise<{ ok: boolean }> {
+    return post('/telegram/test', { chatId });
   },
 };

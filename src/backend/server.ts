@@ -13,6 +13,8 @@ import { startFileWatcher, subscribeToSession, findMostRecentSessionFile } from 
 import { findSessionById } from './services/claude-data.js';
 import { SessionManager } from './services/session-manager.js';
 import { loadMcpServers, saveMcpServers } from './services/mcp-config.js';
+import { loadTelegramConfig, saveTelegramConfig, maskConfig } from './services/telegram-config.js';
+import { TelegramBot } from './services/telegram-bot.js';
 import { BACKEND_PORT } from '../shared/constants.js';
 
 const app = express();
@@ -52,6 +54,38 @@ app.put('/api/mcp/servers', (req, res) => {
   res.json({ ok: true });
 });
 
+// Telegram bot configuration
+app.get('/api/telegram/config', (_req, res) => {
+  const config = loadTelegramConfig();
+  res.json(maskConfig(config));
+});
+app.put('/api/telegram/config', async (req, res) => {
+  try {
+    const existing = loadTelegramConfig();
+    const updated = {
+      botToken: req.body.botToken === '***' + existing.botToken.slice(-4) ? existing.botToken : (req.body.botToken ?? existing.botToken),
+      allowedUserIds: req.body.allowedUserIds ?? existing.allowedUserIds,
+      enabled: req.body.enabled ?? existing.enabled,
+    };
+    saveTelegramConfig(updated);
+    // Restart bot with new config
+    if (telegramBot) {
+      await telegramBot.updateConfig(updated);
+    }
+    res.json(maskConfig(updated));
+  } catch (e) {
+    res.status(500).json({ error: e instanceof Error ? e.message : String(e) });
+  }
+});
+app.post('/api/telegram/test', async (req, res) => {
+  const { chatId } = req.body;
+  if (!chatId || !telegramBot) {
+    return res.status(400).json({ error: 'Bot not running or chatId missing' });
+  }
+  const ok = await telegramBot.sendTestMessage(chatId);
+  res.json({ ok });
+});
+
 // Active session endpoint (for live monitor)
 app.get('/api/live/active', async (req, res) => {
   try {
@@ -85,15 +119,36 @@ const wss = new WebSocketServer({ server, path: '/ws' });
 // Map from chatSessionId → Set of WebSocket clients subscribed to it
 const chatSubscriptions = new Map<string, Set<WebSocket>>();
 
+let telegramBot: TelegramBot | null = null;
+
 const sessionManager = new SessionManager((sessionId, msg) => {
+  // Notify WebSocket clients
   const subs = chatSubscriptions.get(sessionId);
-  if (!subs) return;
-  const payload = JSON.stringify(msg);
-  for (const ws of subs) {
-    if (ws.readyState === WebSocket.OPEN) ws.send(payload);
+  if (subs) {
+    const payload = JSON.stringify(msg);
+    for (const ws of subs) {
+      if (ws.readyState === WebSocket.OPEN) ws.send(payload);
+    }
+  }
+  // Notify Telegram bot
+  if (telegramBot) {
+    telegramBot.handleSessionEvent(sessionId, msg);
   }
 });
 setChatSessionManager(sessionManager);
+
+// Start Telegram bot if configured
+(async () => {
+  try {
+    const telegramConfig = loadTelegramConfig();
+    if (telegramConfig.enabled && telegramConfig.botToken) {
+      telegramBot = new TelegramBot(sessionManager, telegramConfig);
+      await telegramBot.start();
+    }
+  } catch (e) {
+    console.error('[Telegram] Failed to start bot:', e);
+  }
+})();
 
 // ── WebSocket ─────────────────────────────────────────────────────────────────
 // Track unsubscribe functions per WebSocket connection (for file-watcher subs)
