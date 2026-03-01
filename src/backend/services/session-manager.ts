@@ -29,6 +29,8 @@ interface ActiveChat {
   endGenerator: (() => void) | null;
   // AbortController to cancel the query
   abortController: AbortController;
+  // Track whether we've received stream deltas for current turn
+  hasStreamedDeltas: boolean;
 }
 
 interface SDKUserMsg {
@@ -37,6 +39,8 @@ interface SDKUserMsg {
     role: 'user';
     content: string;
   };
+  parent_tool_use_id: string | null;
+  session_id: string;
 }
 
 export class SessionManager {
@@ -73,6 +77,7 @@ export class SessionManager {
       pushMessage: null,
       endGenerator: null,
       abortController,
+      hasStreamedDeltas: false,
     };
     this.chats.set(sessionId, chat);
 
@@ -116,7 +121,6 @@ export class SessionManager {
     chat.pushMessage = pushMessage;
     chat.endGenerator = endGenerator;
 
-    // Strip CLAUDECODE env var so nested sessions are allowed
     // Strip CLAUDECODE env var so nested sessions are allowed
     const { CLAUDECODE: _omit, ...cleanEnv } = process.env as Record<string, string | undefined>;
 
@@ -198,7 +202,7 @@ export class SessionManager {
         if (chat.status === 'ended') break;
 
         // Convert SDK messages to StreamEvent format for the frontend
-        const event = this.sdkMessageToStreamEvent(message);
+        const event = this.sdkMessageToStreamEvent(message, chat);
         if (event) {
           // Track claude session ID from init
           if (event.type === 'system' && 'subtype' in event && event.subtype === 'init') {
@@ -207,6 +211,11 @@ export class SessionManager {
           }
 
           this.notify(sessionId, { type: 'chat-event', sessionId, event });
+
+          // Reset delta tracking after each result (ready for next turn)
+          if (event.type === 'result') {
+            chat.hasStreamedDeltas = false;
+          }
         }
       }
     } catch (err: unknown) {
@@ -233,7 +242,7 @@ export class SessionManager {
    * The SDK emits different message types than the raw CLI JSONL protocol,
    * so we translate them to keep the frontend store logic consistent.
    */
-  private sdkMessageToStreamEvent(msg: any): StreamEvent | null {
+  private sdkMessageToStreamEvent(msg: any, chat: ActiveChat): StreamEvent | null {
     if (!msg || !msg.type) return null;
 
     // System init message
@@ -251,22 +260,25 @@ export class SessionManager {
 
     // Streaming partial (from includePartialMessages)
     if (msg.type === 'stream_event') {
+      chat.hasStreamedDeltas = true;
+
       // The SDK wraps Anthropic API stream events.
       // We translate the relevant ones into our assistant StreamEvent format.
       const event = msg.event;
       if (!event) return null;
 
-      // Content block start — tool_use
+      // Content block start — tool_use: emit as assistant event so the frontend
+      // adds it to the streaming tool list without triggering the approval dialog.
+      // The actual approval goes through the canUseTool callback.
       if (event.type === 'content_block_start' && event.content_block?.type === 'tool_use') {
         return {
-          type: 'tool',
-          subtype: 'approval_request',
-          tool_name: event.content_block.name,
-          tool_id: event.content_block.id,
-          input: {},
-        } as any;
-        // Note: The actual approval goes through canUseTool callback, not this.
-        // We emit this so the frontend can show the tool call starting.
+          type: 'assistant',
+          message: {
+            role: 'assistant',
+            content: [{ type: 'tool_use', id: event.content_block.id, name: event.content_block.name, input: {} }],
+          },
+          session_id: msg.session_id ?? '',
+        };
       }
 
       // For text/thinking deltas, we wrap them as partial assistant messages
@@ -302,6 +314,10 @@ export class SessionManager {
       const assistantMsg = msg.message;
       if (!assistantMsg) return null;
 
+      // If we already streamed deltas for this turn, skip the duplicate complete message
+      if (chat.hasStreamedDeltas) return null;
+
+      // No deltas were streamed — this is a replay message from session resume
       return {
         type: 'assistant',
         message: {
@@ -384,6 +400,8 @@ export class SessionManager {
     chat.pushMessage?.({
       type: 'user',
       message: { role: 'user', content: text },
+      parent_tool_use_id: null,
+      session_id: chat.claudeSessionId ?? '',
     });
   }
 

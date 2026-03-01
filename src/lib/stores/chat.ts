@@ -59,14 +59,43 @@ export function handleStreamEvent(event: StreamEvent): void {
     if (event.type === 'system' && event.subtype === 'init') {
       next.claudeSessionId = event.session_id;
       next.status = 'active';
-      next.isStreaming = false;
-      next.streaming = resetStreaming();
+      // Don't reset streaming state — init arrives after first message
       return next;
     }
 
     if (event.type === 'assistant') {
-      next.isStreaming = true;
       const content = event.message?.content ?? [];
+      const msg = event.message as any;
+
+      // Complete assistant message from session replay (has usage or stop_reason)
+      // goes directly into messages[], not streaming accumulation
+      if (msg?.usage || msg?.stop_reason) {
+        let thinking = '';
+        let text = '';
+        const toolCalls: { id: string; name: string; input: Record<string, unknown> }[] = [];
+
+        for (const block of content) {
+          if (block.type === 'thinking' && block.thinking) thinking += block.thinking;
+          else if (block.type === 'text' && block.text) text += block.text;
+          else if (block.type === 'tool_use' && block.id && block.name) {
+            toolCalls.push({ id: block.id, name: block.name, input: (block.input ?? {}) as Record<string, unknown> });
+          }
+        }
+
+        const chatMsg: ChatMessage = {
+          role: 'assistant',
+          thinking: thinking || undefined,
+          text: text || undefined,
+          toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
+          timestamp: new Date().toISOString(),
+          usage: msg.usage,
+        };
+        next.messages = [...next.messages, chatMsg];
+        return next;
+      }
+
+      // Streaming delta — accumulate into streaming state
+      next.isStreaming = true;
       let thinking = next.streaming.thinking;
       let text = next.streaming.text;
       const tools = [...next.streaming.toolCalls];

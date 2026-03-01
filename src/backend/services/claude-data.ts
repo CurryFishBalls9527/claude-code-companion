@@ -1,17 +1,64 @@
 import { readdir, stat } from 'fs/promises';
+import { existsSync, statSync } from 'fs';
 import { join } from 'path';
 import { PROJECTS_DIR } from '../../shared/constants.js';
 import type { ProjectInfo } from '../../shared/types.js';
 import { readJsonl } from '../utils/jsonl-reader.js';
 
+function isDirSync(p: string): boolean {
+  try { return statSync(p).isDirectory(); } catch { return false; }
+}
+
 /**
  * Convert a project hash (directory name) back to a filesystem path.
- * Claude stores projects as: /some/path -> -some-path (/ replaced with -)
+ * Claude stores projects as: /some/path -> -some-path (/ and . replaced with -)
+ * Uses DFS-based filesystem resolution to handle directory names that contain
+ * hyphens (e.g. claude-code-companion) or dots (e.g. github.com).
  */
 export function hashToPath(hash: string): string {
-  // Replace leading - with / and subsequent - with /
-  // e.g. "-Users-myu-code" -> "/Users/myu/code"
-  return hash.replace(/-/g, '/').replace(/^\//, '/');
+  // Remove leading dash — it represents the root /
+  const body = hash.startsWith('-') ? hash.slice(1) : hash;
+  const parts = body.split('-');
+
+  // DFS: try interpreting each hyphen as / (path sep), . (dot), or - (literal)
+  function resolve(idx: number, base: string, segment: string): string | null {
+    if (idx === parts.length) {
+      // Final segment — check if full path exists
+      const full = base + '/' + segment;
+      if (existsSync(full)) return full;
+      return null;
+    }
+
+    const nextPart = parts[idx];
+
+    // Try / — treat current segment as a directory, start new segment
+    const dirPath = base + '/' + segment;
+    if (isDirSync(dirPath)) {
+      const result = resolve(idx + 1, dirPath, nextPart);
+      if (result) return result;
+    }
+
+    // Try . — append dot and next part to current segment
+    const dotResult = resolve(idx + 1, base, segment + '.' + nextPart);
+    if (dotResult) return dotResult;
+
+    // Try - — append hyphen and next part to current segment
+    const hyphenResult = resolve(idx + 1, base, segment + '-' + nextPart);
+    if (hyphenResult) return hyphenResult;
+
+    return null;
+  }
+
+  if (parts.length === 0) return '/';
+
+  const resolved = parts.length > 1
+    ? resolve(1, '', parts[0])
+    : (existsSync('/' + parts[0]) ? '/' + parts[0] : null);
+
+  if (resolved) return resolved;
+
+  // Fallback: naive replacement (all hyphens → /)
+  return '/' + body.replace(/-/g, '/');
 }
 
 /**
