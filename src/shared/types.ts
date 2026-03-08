@@ -241,6 +241,24 @@ export interface FileEdit {
   linesRemoved: number;
 }
 
+// ─── Subagent Types ──────────────────────────────────────────────────────────
+
+export interface SubagentInfo {
+  toolUseId: string;        // links to the Agent tool_use block
+  agentId?: string;         // from agent_progress entries
+  description: string;      // from Agent tool input
+  subagentType: string;     // "Explore", "Plan", etc.
+  isBackground: boolean;    // from run_in_background input
+  status: 'running' | 'completed' | 'failed';
+  resultSummary?: string;   // first ~500 chars of tool_result
+  startedAt: string;
+}
+
+export interface SubagentStartedMsg   { type: 'subagent-started';   ptySessionId: string; agent: SubagentInfo; }
+export interface SubagentProgressMsg  { type: 'subagent-progress';  ptySessionId: string; toolUseId: string; agentId: string; }
+export interface SubagentCompletedMsg { type: 'subagent-completed'; ptySessionId: string; toolUseId: string; resultSummary: string; }
+export interface SubagentOutputMsg    { type: 'subagent-output';    ptySessionId: string; toolUseId: string; data: string; }
+
 // ─── WebSocket Message Types (live session replay) ───────────────────────────
 
 export interface WsSubscribeMessage {
@@ -304,3 +322,13 @@ export interface ChatEventMsg        { type: 'chat-event';            sessionId:
 export interface PtyOutputMsg        { type: 'pty-output';            sessionId: string; data: string; }
 export interface ToolApprovalReqMsg  { type: 'tool-approval-request'; sessionId: string; toolId: string; toolName: string; input: Record<string, unknown>; }
 export interface ChatSessionEndMsg   { type: 'session-end';           sessionId: string; exitCode: number; }
+
+// PTY (interactive terminal) messages
+// Client → server
+export interface PtyCreateMsg   { type: 'pty-create';  projectPath: string; model?: string; permissionMode?: string; resumeSessionId?: string; cols?: number; rows?: number; }
+export interface PtyInputMsg    { type: 'pty-input';   sessionId: string; data: string; }
+export interface PtyResizeMsg   { type: 'pty-resize';  sessionId: string; cols: number; rows: number; }
+export interface PtyEndMsg      { type: 'pty-end';     sessionId: string; }
+// Server → client
+export interface PtyCreatedMsg  { type: 'pty-created'; sessionId: string; }
+export interface PtyEndedMsg    { type: 'pty-ended';   sessionId: string; exitCode: number; }

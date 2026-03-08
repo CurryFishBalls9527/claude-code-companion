@@ -1,738 +1,927 @@
 <script lang="ts">
-  import { onMount, onDestroy, tick } from 'svelte';
-  import { get } from 'svelte/store';
+  import { onMount, onDestroy } from 'svelte';
   import { page } from '$app/stores';
   import { api } from '$lib/api/client.js';
   import { getWsClient } from '$lib/api/websocket.js';
-  import {
-    chatState,
-    handleStreamEvent,
-    createChatSession,
-    sendChatMessage,
-    approveToolUse,
-    endChatSession,
-    resetChat,
-  } from '$lib/stores/chat.js';
-  import type { ProjectInfo } from '$shared/types.js';
-  import ChatInput from '$lib/components/chat/ChatInput.svelte';
-  import ToolApproval from '$lib/components/chat/ToolApproval.svelte';
-  import StreamingMessage from '$lib/components/chat/StreamingMessage.svelte';
-  import MarkdownRenderer from '$lib/components/shared/MarkdownRenderer.svelte';
+  import TerminalPanel from '$lib/components/chat/TerminalPanel.svelte';
+  import type { ProjectInfo, SubagentInfo } from '$shared/types.js';
 
-  // Setup form state
+  interface SubagentEntry extends SubagentInfo {
+    ptySessionId: string;
+  }
+
+  interface PtyTab {
+    localId: string;
+    ptyId: string;
+    label: string;
+    status: 'idle' | 'creating' | 'active' | 'ended';
+    exitCode: number | null;
+    projectPath: string;
+    model: string;
+    permissionMode: string;
+    resumeSessionId: string;
+    bookmarked: boolean;
+    tags: string[];
+    notes: string;
+    // Virtual tab fields (for background agent output viewing)
+    virtual?: boolean;
+    virtualToolUseId?: string;
+    virtualContent?: string;
+  }
+
+  // Template config (used for new sessions)
   let projects = $state<ProjectInfo[]>([]);
   let projectPath = $state('');
   let model = $state('claude-sonnet-4-6');
   let permissionMode = $state('default');
+  let resumeSessionId = $state('');
 
-  // Advanced settings
-  let showAdvanced = $state(false);
-  let effort = $state('medium');
-  let thinkingMode = $state('auto');
-  let thinkingBudget = $state('');
-  let maxTurns = $state('');
-  let maxBudgetUsd = $state('');
-  let appendPrompt = $state('');
-  let allowedTools = $state('');
-  let disallowedTools = $state('');
-  let customAgents = $state<{ name: string; description: string }[]>([]);
-  let enableFileCheckpointing = $state(false);
-  let mcpServers = $state<{ name: string; type: string; command?: string; args?: string[]; url?: string; env?: Record<string, string>; enabled: boolean }[]>([]);
-  let showToolPanel = $state(false);
+  // Multi-session state
+  let sessions = $state<PtyTab[]>([]);
+  let activeTabId = $state('');
+  let splitTabId = $state<string | null>(null);
+  let splitMode = $state(false);
+  let pendingCreateIds = $state<string[]>([]);
+  let terminalRefs: Record<string, TerminalPanel> = {};
 
-  // UI state
-  let messagesContainer = $state<HTMLElement | null>(null);
-  let autoScroll = $state(true);
-  let showScrollBtn = $state(false);
+  let activeSession = $derived(sessions.find(s => s.localId === activeTabId));
+  let splitSession = $derived(splitTabId ? sessions.find(s => s.localId === splitTabId) : null);
 
-  const state = $derived($chatState);
+  // Subagent tracking
+  let subagents = $state<SubagentEntry[]>([]);
+  let subagentsOpen = $state(true);
+  let activeSessionSubagents = $derived(
+    activeSession?.ptyId
+      ? subagents.filter(s => s.ptySessionId === activeSession!.ptyId)
+      : []
+  );
 
-  // Wire up WebSocket chat events
+  // Sidebar
+  let sidebarOpen = $state(true);
+  let configOpen = $state(true);
+
+  // Tab rename
+  let renamingTabId = $state<string | null>(null);
+  let renameValue = $state('');
+
+  function startRename(localId: string) {
+    const session = sessions.find(s => s.localId === localId);
+    if (!session) return;
+    renamingTabId = localId;
+    renameValue = session.label;
+  }
+
+  function commitRename() {
+    if (renamingTabId) {
+      const session = sessions.find(s => s.localId === renamingTabId);
+      if (session && renameValue.trim()) {
+        session.label = renameValue.trim();
+        sessions = sessions;
+      }
+      renamingTabId = null;
+    }
+  }
+
+  // Tag input
+  let tagInput = $state('');
+  let notesSaveTimer: ReturnType<typeof setTimeout> | null = null;
+
   let cleanups: (() => void)[] = [];
 
+  function genId(): string {
+    return crypto.randomUUID();
+  }
+
+  function labelFromPath(path: string): string {
+    const parts = path.replace(/\/+$/, '').split('/');
+    return parts[parts.length - 1] || 'session';
+  }
+
+  // ── Session lifecycle ──
+
+  function addSession(): string {
+    const localId = genId();
+    const tab: PtyTab = {
+      localId,
+      ptyId: '',
+      label: labelFromPath(projectPath || 'session'),
+      status: 'idle',
+      exitCode: null,
+      projectPath,
+      model,
+      permissionMode,
+      resumeSessionId,
+      bookmarked: false,
+      tags: [],
+      notes: '',
+    };
+    sessions = [...sessions, tab];
+    activeTabId = localId;
+    configOpen = true;
+    return localId;
+  }
+
+  function startSession(localId?: string) {
+    const id = localId ?? activeTabId;
+    const session = sessions.find(s => s.localId === id);
+    if (!session || !session.projectPath.trim()) return;
+
+    session.status = 'creating';
+    session.exitCode = null;
+    session.label = labelFromPath(session.projectPath);
+    sessions = sessions;
+    configOpen = false;
+
+    pendingCreateIds = [...pendingCreateIds, id];
+
+    const ws = getWsClient();
+    const ref = terminalRefs[id];
+    const cols = ref?.getCols() ?? 80;
+    const rows = ref?.getRows() ?? 24;
+
+    ws.createPtySession({
+      projectPath: session.projectPath.trim(),
+      model: session.model || undefined,
+      permissionMode: session.permissionMode,
+      resumeSessionId: session.resumeSessionId.trim() || undefined,
+      cols,
+      rows,
+    });
+  }
+
+  function endSession(localId?: string) {
+    const id = localId ?? activeTabId;
+    const session = sessions.find(s => s.localId === id);
+    if (!session?.ptyId) return;
+    const ws = getWsClient();
+    ws.endPtySession(session.ptyId);
+  }
+
+  function closeTab(localId: string) {
+    const session = sessions.find(s => s.localId === localId);
+    if (session && !session.virtual && (session.status === 'active' || session.status === 'creating')) {
+      if (session.ptyId) {
+        const ws = getWsClient();
+        ws.endPtySession(session.ptyId);
+      }
+    }
+
+    // Clean up terminal ref and subagents (only for real sessions)
+    delete terminalRefs[localId];
+    if (session?.ptyId && !session.virtual) {
+      subagents = subagents.filter(s => s.ptySessionId !== session.ptyId);
+    }
+
+    sessions = sessions.filter(s => s.localId !== localId);
+
+    // Fix active tab
+    if (activeTabId === localId) {
+      activeTabId = sessions.length > 0 ? sessions[sessions.length - 1].localId : '';
+    }
+
+    // Fix split
+    if (splitTabId === localId) {
+      splitTabId = null;
+    }
+    if (sessions.length < 2) {
+      splitMode = false;
+      splitTabId = null;
+    }
+  }
+
+  function makeTermDataHandler(localId: string) {
+    return (data: string) => {
+      const session = sessions.find(s => s.localId === localId);
+      if (!session?.ptyId || session.status !== 'active') return;
+      const ws = getWsClient();
+      ws.sendPtyInput(session.ptyId, data);
+    };
+  }
+
+  function makeTermResizeHandler(localId: string) {
+    return (cols: number, rows: number) => {
+      const session = sessions.find(s => s.localId === localId);
+      if (!session?.ptyId || session.status !== 'active') return;
+      const ws = getWsClient();
+      ws.resizePty(session.ptyId, cols, rows);
+    };
+  }
+
+  // ── Split view ──
+
+  function toggleSplit() {
+    const candidates = sessions.filter(s => s.localId !== activeTabId);
+    if (candidates.length < 1) return;
+    splitMode = !splitMode;
+    if (splitMode) {
+      splitTabId = candidates[0].localId;
+    } else {
+      splitTabId = null;
+    }
+  }
+
+  function selectSplitTab(localId: string) {
+    splitTabId = localId;
+  }
+
+  // ── Session meta helpers ──
+
+  function toggleBookmark() {
+    if (!activeSession) return;
+    activeSession.bookmarked = !activeSession.bookmarked;
+    sessions = sessions;
+    if (activeSession.ptyId) {
+      api.updateSessionMeta(activeSession.ptyId, { bookmarked: activeSession.bookmarked }).catch(() => {});
+    }
+  }
+
+  function addTag() {
+    if (!activeSession) return;
+    const t = tagInput.trim();
+    if (!t || activeSession.tags.includes(t)) { tagInput = ''; return; }
+    activeSession.tags = [...activeSession.tags, t];
+    tagInput = '';
+    sessions = sessions;
+    if (activeSession.ptyId) {
+      api.updateSessionMeta(activeSession.ptyId, { tags: activeSession.tags }).catch(() => {});
+    }
+  }
+
+  function removeTag(tag: string) {
+    if (!activeSession) return;
+    activeSession.tags = activeSession.tags.filter(t => t !== tag);
+    sessions = sessions;
+    if (activeSession.ptyId) {
+      api.updateSessionMeta(activeSession.ptyId, { tags: activeSession.tags }).catch(() => {});
+    }
+  }
+
+  function handleNotesInput() {
+    if (notesSaveTimer) clearTimeout(notesSaveTimer);
+    notesSaveTimer = setTimeout(() => {
+      if (activeSession?.ptyId) {
+        api.updateSessionMeta(activeSession.ptyId, { notes: activeSession.notes }).catch(() => {});
+      }
+    }, 1000);
+  }
+
+  // ── Virtual tabs for background agent output ──
+
+  function viewSubagentOutput(sa: SubagentEntry) {
+    // Check if a virtual tab already exists for this agent
+    const existing = sessions.find(s => s.virtual && s.virtualToolUseId === sa.toolUseId);
+    if (existing) {
+      splitMode = true;
+      splitTabId = existing.localId;
+      return;
+    }
+
+    const localId = genId();
+    const tab: PtyTab = {
+      localId,
+      ptyId: sa.ptySessionId,
+      label: `Agent: ${sa.description.slice(0, 20)}`,
+      status: sa.status === 'running' ? 'active' : 'ended',
+      exitCode: null,
+      projectPath: '',
+      model: '',
+      permissionMode: '',
+      resumeSessionId: '',
+      bookmarked: false,
+      tags: [],
+      notes: '',
+      virtual: true,
+      virtualToolUseId: sa.toolUseId,
+      virtualContent: sa.resultSummary || '',
+    };
+    sessions = [...sessions, tab];
+    // Open in split pane (right side), don't change active tab
+    splitMode = true;
+    splitTabId = localId;
+  }
+
+  function closeVirtualTab(localId: string) {
+    sessions = sessions.filter(s => s.localId !== localId);
+    if (splitTabId === localId) {
+      // Switch to another right-pane tab or close split
+      const remaining = sessions.filter(s => s.localId !== activeTabId);
+      if (remaining.length > 0) {
+        splitTabId = remaining[0].localId;
+      } else {
+        splitMode = false;
+        splitTabId = null;
+      }
+    }
+  }
+
+  // ── Auto-scroll action for virtual tab output ──
+  function autoScroll(node: HTMLElement, _content: string | undefined) {
+    function scroll() {
+      // Only auto-scroll if user is near the bottom
+      const threshold = 100;
+      const isNearBottom = node.scrollHeight - node.scrollTop - node.clientHeight < threshold;
+      if (isNearBottom) {
+        node.scrollTop = node.scrollHeight;
+      }
+    }
+    scroll();
+    return {
+      update() { requestAnimationFrame(scroll); },
+    };
+  }
+
+  // ── Status dot color ──
+
+  function statusDotClass(status: PtyTab['status']): string {
+    switch (status) {
+      case 'active': return 'bg-green-400';
+      case 'creating': return 'bg-blue-400 animate-pulse';
+      case 'ended': return 'bg-red-400';
+      default: return 'bg-gray-500';
+    }
+  }
+
   onMount(async () => {
-    // Load custom agents from localStorage
-    try {
-      const saved = localStorage.getItem('companion:customAgents');
-      if (saved) customAgents = JSON.parse(saved);
-    } catch {}
-
-    [projects, mcpServers] = await Promise.all([
-      api.getProjects().catch(() => []),
-      api.getMcpServers().catch(() => []),
-    ]);
-
-    // Pre-fill project path from first project
+    projects = await api.getProjects().catch(() => []);
     if (projects.length > 0 && !projectPath) {
       projectPath = projects[0].path;
     }
 
+    const resumeParam = $page.url.searchParams.get('resume');
+    const projectParam = $page.url.searchParams.get('project');
+    if (resumeParam) resumeSessionId = resumeParam;
+    if (projectParam) projectPath = projectParam;
+
     const ws = getWsClient();
 
     cleanups.push(
-      ws.onChatCreated((sessionId) => {
-        chatState.update((s) => ({ ...s, sessionId, status: 'active' }));
+      ws.onPtyCreated((ptyId) => {
+        const localId = pendingCreateIds[0];
+        pendingCreateIds = pendingCreateIds.slice(1);
+        const session = sessions.find(s => s.localId === localId);
+        if (session) {
+          session.ptyId = ptyId;
+          session.status = 'active';
+          sessions = sessions;
+        }
+        setTimeout(() => terminalRefs[localId ?? '']?.focus(), 100);
       }),
-      ws.onChatEvent((eventSessionId, event) => {
-        const current = get(chatState);
-        // Ignore events from old sessions — only process if session matches or
-        // if we're in 'creating' state (sessionId not yet assigned, init event incoming)
-        if (current.sessionId && current.sessionId !== eventSessionId) return;
-        if (!current.sessionId && current.status !== 'creating') return;
-        handleStreamEvent(event);
+      ws.onPtyOutput((ptyId, data) => {
+        const session = sessions.find(s => s.ptyId === ptyId);
+        if (session) terminalRefs[session.localId]?.write(data);
       }),
-      ws.onToolApproval((msg) => {
-        chatState.update((s) => ({
-          ...s,
-          status: 'waiting_approval',
-          pendingApproval: { toolId: msg.toolId, toolName: msg.toolName, input: msg.input },
-        }));
+      ws.onPtyEnded((ptyId, code) => {
+        const session = sessions.find(s => s.ptyId === ptyId);
+        if (session) {
+          session.status = 'ended';
+          session.exitCode = code;
+          sessions = sessions;
+        }
+        // Mark any running subagents as failed
+        let changed = false;
+        for (const sa of subagents) {
+          if (sa.ptySessionId === ptyId && sa.status === 'running') {
+            sa.status = 'failed';
+            changed = true;
+          }
+        }
+        if (changed) subagents = subagents;
       }),
-      ws.onChatSessionEnd((endedSessionId, exitCode) => {
-        chatState.update((s) => {
-          // Only apply if this is our current session — ignore stale ends from old/forked sessions
-          if (s.sessionId !== endedSessionId) return s;
-          return { ...s, status: 'ended', isStreaming: false };
-        });
+      ws.onSubagentStarted((ptyId, agent) => {
+        if (sessions.some(s => s.ptyId === ptyId)) {
+          subagents = [...subagents, { ...agent, ptySessionId: ptyId }];
+        }
+      }),
+      ws.onSubagentCompleted((ptyId, toolUseId, summary) => {
+        const sa = subagents.find(a => a.toolUseId === toolUseId && a.ptySessionId === ptyId);
+        if (sa) {
+          sa.status = 'completed';
+          sa.resultSummary = summary;
+          subagents = subagents;
+        }
+        // Update virtual tab status
+        const vtab = sessions.find(s => s.virtual && s.virtualToolUseId === toolUseId);
+        if (vtab) {
+          vtab.status = 'ended';
+          sessions = sessions;
+        }
+      }),
+      ws.onSubagentOutput((ptyId, toolUseId, data) => {
+        // Append to virtual tab content if one exists
+        const vtab = sessions.find(s => s.virtual && s.virtualToolUseId === toolUseId);
+        if (vtab) {
+          vtab.virtualContent = (vtab.virtualContent || '') + data;
+          sessions = sessions;
+        }
+        // Also accumulate in the subagent entry for later viewing
+        const sa = subagents.find(a => a.toolUseId === toolUseId && a.ptySessionId === ptyId);
+        if (sa) {
+          sa.resultSummary = (sa.resultSummary || '') + data;
+          subagents = subagents;
+        }
       }),
       ws.onError((message) => {
-        chatState.update((s) => ({
-          ...s,
-          status: s.status === 'creating' ? 'idle' : s.status,
-          error: message,
-        }));
+        // If creating, revert the pending session
+        const pendingId = pendingCreateIds[0];
+        if (pendingId) {
+          const session = sessions.find(s => s.localId === pendingId);
+          if (session && session.status === 'creating') {
+            session.status = 'idle';
+            sessions = sessions;
+          }
+          pendingCreateIds = pendingCreateIds.slice(1);
+        }
+        console.error('[PTY] Error:', message);
       }),
     );
 
-    // Check for ?resume= param (optionally with ?project= to set correct cwd)
-    const resumeId = $page.url.searchParams.get('resume');
-    const projectParam = $page.url.searchParams.get('project');
-    if (resumeId) {
-      if (projectParam) projectPath = projectParam;
-      if (projectPath) createChatSession({ projectPath, model, resumeSessionId: resumeId, permissionMode });
+    // Auto-start if resume param present
+    if (resumeParam && projectPath) {
+      const localId = addSession();
+      const session = sessions.find(s => s.localId === localId);
+      if (session) {
+        session.resumeSessionId = resumeParam;
+        session.projectPath = projectPath;
+        sessions = sessions;
+      }
+      startSession(localId);
     }
   });
 
   onDestroy(() => {
     for (const cleanup of cleanups) cleanup();
+    if (notesSaveTimer) clearTimeout(notesSaveTimer);
   });
 
-  // Auto-scroll
+  // Collapse config when a session becomes active
   $effect(() => {
-    const msgs = state.messages;
-    const streaming = state.isStreaming;
-    if (autoScroll && messagesContainer) {
-      tick().then(() => {
-        messagesContainer!.scrollTop = messagesContainer!.scrollHeight;
-      });
+    if (activeSession && activeSession.status === 'active') {
+      configOpen = false;
     }
   });
 
-  function handleScroll() {
-    if (!messagesContainer) return;
-    const { scrollTop, scrollHeight, clientHeight } = messagesContainer;
-    const atBottom = scrollHeight - scrollTop - clientHeight < 60;
-    autoScroll = atBottom;
-    showScrollBtn = !atBottom;
-  }
-
-  function scrollToBottom() {
-    if (!messagesContainer) return;
-    messagesContainer.scrollTop = messagesContainer.scrollHeight;
-    autoScroll = true;
-    showScrollBtn = false;
-  }
-
-  function startSession() {
-    if (!projectPath.trim()) return;
-    const thinkingConfig = thinkingMode === 'auto' ? undefined
-      : thinkingMode === 'enabled' ? { type: 'enabled', budgetTokens: thinkingBudget ? Number(thinkingBudget) : undefined }
-      : { type: 'disabled' };
-    // Save custom agents to localStorage
-    const validAgents = customAgents.filter(a => a.name.trim());
-    if (validAgents.length > 0) {
-      localStorage.setItem('companion:customAgents', JSON.stringify(validAgents));
+  // Expand config when no sessions
+  $effect(() => {
+    if (sessions.length === 0) {
+      configOpen = true;
     }
+  });
 
-    createChatSession({
-      projectPath: projectPath.trim(),
-      model: model || undefined,
-      permissionMode,
-      effort: effort !== 'medium' ? effort : undefined,
-      thinking: thinkingConfig,
-      maxTurns: maxTurns ? Number(maxTurns) : undefined,
-      maxBudgetUsd: maxBudgetUsd ? Number(maxBudgetUsd) : undefined,
-      appendSystemPrompt: appendPrompt.trim() || undefined,
-      allowedTools: allowedTools.trim() ? allowedTools.split(',').map(s => s.trim()) : undefined,
-      disallowedTools: disallowedTools.trim() ? disallowedTools.split(',').map(s => s.trim()) : undefined,
-      customAgents: validAgents.length > 0 ? Object.fromEntries(validAgents.map(a => [a.name, { description: a.description }])) : undefined,
-      mcpServers: mcpServers.filter(s => s.enabled).length > 0
-        ? Object.fromEntries(mcpServers.filter(s => s.enabled).map(s => [s.name, { type: s.type, command: s.command, args: s.args, url: s.url, env: s.env }]))
-        : undefined,
-      enableFileCheckpointing: enableFileCheckpointing || undefined,
-    });
-  }
-
-  function handleSend(text: string) {
-    sendChatMessage(text);
-  }
-
-  function handleSlashCommand(cmd: { name: string; isBuiltIn?: boolean }, args: string) {
-    const ws = getWsClient();
-    switch (cmd.name) {
-      case 'plan':
-        ws.updateSessionSettings(state.sessionId!, { permissionMode: 'plan' });
-        chatState.update(s => ({ ...s, permissionMode: 'plan' }));
-        break;
-      case 'default':
-        ws.updateSessionSettings(state.sessionId!, { permissionMode: 'default' });
-        chatState.update(s => ({ ...s, permissionMode: 'default' }));
-        break;
-      case 'yolo':
-        ws.updateSessionSettings(state.sessionId!, { permissionMode: 'bypassPermissions' });
-        chatState.update(s => ({ ...s, permissionMode: 'bypassPermissions' }));
-        break;
-      case 'stop':
-        ws.interruptSession(state.sessionId!);
-        break;
-      case 'clear':
-        chatState.update(s => ({ ...s, messages: [] }));
-        break;
-      case 'new':
-        endChatSession();
-        resetChat();
-        break;
-      default:
-        // Forward SDK slash commands as messages
-        sendChatMessage('/' + cmd.name + (args ? ' ' + args : ''));
-        break;
-    }
-  }
+  // Right-pane tabs: all sessions except the active (left) one
+  let rightPaneTabs = $derived(sessions.filter(s => s.localId !== activeTabId));
 </script>
 
-<div class="h-full flex flex-col">
-  {#if state.status === 'idle' || state.status === 'creating'}
-    <!-- ── Session creation form ── -->
-    <div class="flex-1 flex items-center justify-center p-8">
-      <div class="w-full max-w-md space-y-6">
-        <div>
-          <h1 class="text-2xl font-bold text-white">Start Claude Session</h1>
-          <p class="text-sm text-gray-500 mt-1">Interactive chat with Claude Code via Agent SDK</p>
-        </div>
-
-        <div class="space-y-4">
-          <div>
-            <label class="block text-xs text-gray-400 mb-1.5 font-medium">Project path</label>
-            {#if projects.length > 0}
-              <select
-                bind:value={projectPath}
-                class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2.5 text-sm text-gray-200 focus:outline-none focus:border-blue-500 mb-2"
-              >
-                {#each projects as p}
-                  <option value={p.path}>{p.name}</option>
-                {/each}
-              </select>
-            {/if}
+<div class="h-full flex">
+  <!-- Terminal area -->
+  <div class="flex-1 flex flex-col min-w-0">
+    <!-- Tab bar -->
+    <div class="shrink-0 flex items-center bg-gray-900 border-b border-gray-800 px-1 h-9 gap-0.5">
+      {#each sessions.filter(s => !s.virtual) as session (session.localId)}
+        <button
+          onclick={() => { activeTabId = session.localId; }}
+          ondblclick={(e) => { e.preventDefault(); startRename(session.localId); }}
+          class="group flex items-center gap-1.5 px-2.5 py-1 rounded-t text-xs max-w-[180px] transition-colors {activeTabId === session.localId ? 'bg-blue-600/20 text-blue-300' : 'text-gray-500 hover:bg-gray-800 hover:text-gray-300'}"
+        >
+          <span class="w-2 h-2 rounded-full shrink-0 {statusDotClass(session.status)}"></span>
+          {#if renamingTabId === session.localId}
+            <!-- svelte-ignore node_invalid_placement -->
             <input
               type="text"
-              bind:value={projectPath}
-              placeholder="/Users/you/project"
-              class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2.5 text-sm text-gray-200 placeholder-gray-500 focus:outline-none focus:border-blue-500 font-mono"
+              bind:value={renameValue}
+              onclick={(e) => e.stopPropagation()}
+              onblur={commitRename}
+              onkeydown={(e) => { if (e.key === 'Enter') commitRename(); if (e.key === 'Escape') { renamingTabId = null; } }}
+              class="w-20 bg-gray-800 border border-blue-500 rounded px-1 py-0 text-xs text-gray-200 focus:outline-none"
+              autofocus
             />
-          </div>
+          {:else}
+            <span class="truncate">{session.label}</span>
+          {/if}
+          <!-- svelte-ignore node_invalid_placement -->
+          <span
+            role="button"
+            tabindex="-1"
+            onclick={(e) => { e.stopPropagation(); closeTab(session.localId); }}
+            onkeydown={(e) => { if (e.key === 'Enter') { e.stopPropagation(); closeTab(session.localId); } }}
+            class="ml-0.5 text-gray-600 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity cursor-pointer"
+          >×</span>
+        </button>
+      {/each}
 
-          <div class="grid grid-cols-2 gap-3">
-            <div>
-              <label class="block text-xs text-gray-400 mb-1.5 font-medium">Model</label>
-              <select
-                bind:value={model}
-                class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2.5 text-sm text-gray-200 focus:outline-none focus:border-blue-500"
-              >
-                <option value="claude-sonnet-4-6">Sonnet 4.6</option>
-                <option value="claude-opus-4-6">Opus 4.6</option>
-                <option value="claude-haiku-4-5-20251001">Haiku 4.5</option>
-                <option value="claude-sonnet-4-5">Sonnet 4.5</option>
-                <option value="claude-opus-4-5">Opus 4.5</option>
-              </select>
-            </div>
-            <div>
-              <label class="block text-xs text-gray-400 mb-1.5 font-medium">Permissions</label>
-              <select
-                bind:value={permissionMode}
-                class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2.5 text-sm text-gray-200 focus:outline-none focus:border-blue-500"
-              >
-                <option value="default">Default (approve via UI)</option>
-                <option value="acceptEdits">Accept edits</option>
-                <option value="bypassPermissions">Bypass all permissions</option>
-                <option value="plan">Plan only (read-only)</option>
-              </select>
-            </div>
-          </div>
+      <!-- Add tab -->
+      <button
+        onclick={() => addSession()}
+        class="px-2 py-1 text-gray-600 hover:text-blue-400 text-sm transition-colors"
+        title="New session tab"
+      >+</button>
 
-          <!-- Advanced settings -->
-          <div>
-            <button
-              type="button"
-              onclick={() => showAdvanced = !showAdvanced}
-              class="text-xs text-gray-500 hover:text-gray-300 cursor-pointer transition-colors"
-            >
-              {showAdvanced ? '▾' : '▸'} Advanced settings
-            </button>
-            {#if showAdvanced}
-              <div class="mt-3 space-y-3">
-                <div class="grid grid-cols-2 gap-3">
-                  <div>
-                    <label class="block text-xs text-gray-400 mb-1 font-medium">Effort</label>
-                    <select bind:value={effort} class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-blue-500">
-                      <option value="low">Low</option>
-                      <option value="medium">Medium</option>
-                      <option value="high">High</option>
-                    </select>
-                  </div>
-                  <div>
-                    <label class="block text-xs text-gray-400 mb-1 font-medium">Thinking</label>
-                    <select bind:value={thinkingMode} class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200 focus:outline-none focus:border-blue-500">
-                      <option value="auto">Auto (adaptive)</option>
-                      <option value="enabled">Enabled</option>
-                      <option value="disabled">Disabled</option>
-                    </select>
-                  </div>
+      <div class="flex-1"></div>
+
+      <!-- Split toggle -->
+      <button
+        onclick={toggleSplit}
+        disabled={sessions.filter(s => s.localId !== activeTabId).length < 1}
+        class="px-2 py-1 text-sm transition-colors disabled:opacity-30 disabled:cursor-not-allowed {splitMode ? 'text-blue-400' : 'text-gray-600 hover:text-gray-300'}"
+        title={splitMode ? 'Disable split view' : 'Split view'}
+      >⫼</button>
+    </div>
+
+    <!-- Terminal panes -->
+    <div class="flex-1 min-h-0 relative">
+      {#each sessions as session (session.localId)}
+        {@const isLeft = session.localId === activeTabId}
+        {@const isRight = splitMode && session.localId === splitTabId}
+        {@const isVisible = isLeft || isRight}
+
+        <div
+          class="absolute top-0 bottom-0"
+          style={
+            !isVisible ? 'display:none' :
+            !splitMode ? 'left:0;right:0' :
+            isLeft ? 'left:0;width:50%' :
+            'left:calc(50% + 141px);right:0'
+          }
+        >
+          {#if session.virtual}
+            <!-- Virtual tab: read-only agent output viewer -->
+            {@const vtContent = session.virtualContent}
+            <div class="h-full flex flex-col bg-[#0d1117]">
+              <div class="shrink-0 px-3 py-1.5 border-b border-gray-800 flex items-center gap-2">
+                <span class="w-2 h-2 rounded-full {session.status === 'active' ? 'bg-green-400 animate-pulse' : 'bg-gray-500'}"></span>
+                <span class="text-xs text-gray-400">{session.label}</span>
+                {#if session.status === 'ended'}
+                  <span class="text-[10px] text-gray-600">completed</span>
+                {/if}
+              </div>
+              <div
+                class="flex-1 overflow-auto p-3"
+                use:autoScroll={vtContent}
+              >
+                <pre class="text-xs text-gray-300 font-mono whitespace-pre-wrap break-words leading-relaxed">{vtContent || '(waiting for output...)'}</pre>
+              </div>
+            </div>
+          {:else if session.status === 'idle' || session.status === 'creating'}
+            <!-- Placeholder for idle/creating -->
+            <div class="h-full flex items-center justify-center bg-[#0d1117]">
+              <div class="text-center space-y-3">
+                <div class="text-gray-500 text-sm">
+                  {session.status === 'creating' ? '' : 'Configure & start this session'}
                 </div>
-
-                {#if thinkingMode === 'enabled'}
-                  <div>
-                    <label class="block text-xs text-gray-400 mb-1 font-medium">Thinking budget (tokens)</label>
-                    <input type="number" bind:value={thinkingBudget} min="1" placeholder="Default" class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:outline-none focus:border-blue-500" />
+                {#if session.status === 'creating'}
+                  <div class="flex items-center justify-center gap-2 text-sm text-blue-400">
+                    <span class="w-2 h-2 rounded-full bg-blue-400 animate-pulse"></span>
+                    Starting...
                   </div>
                 {/if}
-
-                <div class="grid grid-cols-2 gap-3">
-                  <div>
-                    <label class="block text-xs text-gray-400 mb-1 font-medium">Max turns</label>
-                    <input type="number" bind:value={maxTurns} min="1" placeholder="No limit" class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:outline-none focus:border-blue-500" />
-                  </div>
-                  <div>
-                    <label class="block text-xs text-gray-400 mb-1 font-medium">Max budget ($)</label>
-                    <input type="number" bind:value={maxBudgetUsd} min="0" step="0.01" placeholder="No limit" class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:outline-none focus:border-blue-500" />
-                  </div>
-                </div>
-
-                <div class="flex items-center gap-2">
-                  <input type="checkbox" bind:checked={enableFileCheckpointing} class="accent-blue-500" id="checkpoint-toggle" />
-                  <label for="checkpoint-toggle" class="text-xs text-gray-400 font-medium cursor-pointer">Enable file checkpointing (undo support)</label>
-                </div>
-
-                <div>
-                  <label class="block text-xs text-gray-400 mb-1 font-medium">Custom instructions</label>
-                  <textarea bind:value={appendPrompt} rows="3" placeholder="Appended to system prompt..." class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:outline-none focus:border-blue-500 resize-none"></textarea>
-                </div>
-
-                <div class="grid grid-cols-2 gap-3">
-                  <div>
-                    <label class="block text-xs text-gray-400 mb-1 font-medium">Allowed tools</label>
-                    <input type="text" bind:value={allowedTools} placeholder="e.g. Bash,Read,Write" class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:outline-none focus:border-blue-500 font-mono" />
-                  </div>
-                  <div>
-                    <label class="block text-xs text-gray-400 mb-1 font-medium">Disallowed tools</label>
-                    <input type="text" bind:value={disallowedTools} placeholder="e.g. Write,NotebookEdit" class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm text-gray-200 placeholder-gray-500 focus:outline-none focus:border-blue-500 font-mono" />
-                  </div>
-                </div>
-
-                <!-- Custom agents -->
-                <div>
-                  <label class="block text-xs text-gray-400 mb-1 font-medium">Custom Agents</label>
-                  <div class="space-y-2">
-                    {#each customAgents as agent, i}
-                      <div class="flex gap-2">
-                        <input bind:value={agent.name} placeholder="Name" class="w-28 bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-xs text-gray-200 placeholder-gray-500 focus:outline-none focus:border-blue-500 font-mono" />
-                        <input bind:value={agent.description} placeholder="Description" class="flex-1 bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-xs text-gray-200 placeholder-gray-500 focus:outline-none focus:border-blue-500" />
-                        <button onclick={() => { customAgents = customAgents.filter((_, j) => j !== i); }} class="text-xs text-gray-600 hover:text-red-400 px-1">x</button>
-                      </div>
-                    {/each}
-                    <button
-                      onclick={() => { customAgents = [...customAgents, { name: '', description: '' }]; }}
-                      class="text-xs text-gray-500 hover:text-blue-400 transition-colors"
-                    >
-                      + Add agent
-                    </button>
-                  </div>
-                </div>
-
-                <!-- MCP Servers -->
-                <div>
-                  <label class="block text-xs text-gray-400 mb-1 font-medium">MCP Servers</label>
-                  <div class="space-y-2">
-                    {#each mcpServers as server, i}
-                      <div class="flex items-center gap-2 bg-gray-800/50 rounded px-2 py-1.5">
-                        <input type="checkbox" bind:checked={server.enabled} class="accent-blue-500" />
-                        <span class="text-xs font-mono text-gray-300">{server.name}</span>
-                        <span class="text-[10px] text-gray-600">{server.type}</span>
-                        <span class="text-[10px] text-gray-600 truncate flex-1">{server.command || server.url || ''}</span>
-                        <button onclick={() => { mcpServers = mcpServers.filter((_, j) => j !== i); }} class="text-xs text-gray-600 hover:text-red-400 px-1">x</button>
-                      </div>
-                    {/each}
-                    <div class="flex gap-2">
-                      <button
-                        onclick={() => { mcpServers = [...mcpServers, { name: '', type: 'stdio', command: '', args: [], enabled: true }]; }}
-                        class="text-xs text-gray-500 hover:text-blue-400 transition-colors"
-                      >
-                        + Add stdio server
-                      </button>
-                      <button
-                        onclick={() => { mcpServers = [...mcpServers, { name: '', type: 'sse', url: '', enabled: true }]; }}
-                        class="text-xs text-gray-500 hover:text-blue-400 transition-colors"
-                      >
-                        + Add SSE server
-                      </button>
-                    </div>
-                    {#each mcpServers as server, i}
-                      {#if !server.name || (!server.command && !server.url)}
-                        <div class="flex gap-2 pl-2 border-l-2 border-blue-700/40">
-                          <input bind:value={server.name} placeholder="Name" class="w-24 bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs text-gray-200 placeholder-gray-500 focus:outline-none focus:border-blue-500 font-mono" />
-                          {#if server.type === 'stdio'}
-                            <input bind:value={server.command} placeholder="Command (e.g. npx)" class="flex-1 bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs text-gray-200 placeholder-gray-500 focus:outline-none focus:border-blue-500 font-mono" />
-                          {:else}
-                            <input bind:value={server.url} placeholder="URL" class="flex-1 bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs text-gray-200 placeholder-gray-500 focus:outline-none focus:border-blue-500 font-mono" />
-                          {/if}
-                        </div>
-                      {/if}
-                    {/each}
-                    {#if mcpServers.length > 0}
-                      <button
-                        onclick={async () => { await api.saveMcpServers(mcpServers.filter(s => s.name)); }}
-                        class="text-xs text-gray-500 hover:text-green-400 transition-colors"
-                      >
-                        Save MCP config
-                      </button>
-                    {/if}
-                  </div>
-                </div>
               </div>
+            </div>
+          {:else}
+            <!-- Terminal -->
+            <div class="h-full">
+              <TerminalPanel
+                bind:this={terminalRefs[session.localId]}
+                visible={isVisible}
+                onData={makeTermDataHandler(session.localId)}
+                onResize={makeTermResizeHandler(session.localId)}
+              />
+            </div>
+          {/if}
+        </div>
+      {/each}
+
+      <!-- Split divider -->
+      {#if splitMode && splitTabId}
+        <div class="absolute top-0 bottom-0 left-1/2 w-px bg-gray-700 z-10"></div>
+
+        <!-- Right pane vertical tab strip -->
+        <div class="absolute top-0 bottom-0 z-20 flex flex-col bg-gray-900 border-l border-r border-gray-700 overflow-y-auto" style="left:50%; width:140px">
+          {#each rightPaneTabs as tab (tab.localId)}
+            <button
+              onclick={() => selectSplitTab(tab.localId)}
+              class="group flex items-center gap-2 px-2 py-2 text-left transition-colors border-b border-gray-800 {tab.localId === splitTabId ? 'bg-blue-600/20' : 'hover:bg-gray-800'}"
+              title={tab.label}
+            >
+              {#if tab.virtual}
+                <span class="text-[10px] shrink-0 {tab.status === 'active' ? 'text-green-400' : 'text-gray-500'}">&#9658;</span>
+              {:else}
+                <span class="w-2 h-2 rounded-full shrink-0 {statusDotClass(tab.status)}"></span>
+              {/if}
+              <span
+                class="text-[11px] truncate flex-1 {tab.localId === splitTabId ? 'text-blue-300' : 'text-gray-400'}"
+              >{tab.label}</span>
+              {#if tab.virtual}
+                <!-- svelte-ignore node_invalid_placement -->
+                <span
+                  role="button"
+                  tabindex="-1"
+                  onclick={(e) => { e.stopPropagation(); closeVirtualTab(tab.localId); }}
+                  onkeydown={(e) => { if (e.key === 'Enter') { e.stopPropagation(); closeVirtualTab(tab.localId); } }}
+                  class="text-xs text-gray-600 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity cursor-pointer shrink-0"
+                >×</span>
+              {/if}
+            </button>
+          {/each}
+        </div>
+      {/if}
+
+      <!-- Empty state (no sessions) -->
+      {#if sessions.length === 0}
+        <div class="absolute inset-0 flex items-center justify-center bg-[#0d1117]">
+          <div class="text-center space-y-4">
+            <div class="text-gray-500 text-lg">Start a Claude session</div>
+            <p class="text-xs text-gray-600">Configure in the sidebar and click Start</p>
+          </div>
+        </div>
+      {/if}
+    </div>
+
+    <!-- Ended bar for active session -->
+    {#if activeSession?.status === 'ended' && !activeSession?.virtual}
+      <div class="shrink-0 px-4 py-2 bg-gray-900 border-t border-gray-800 flex items-center gap-3">
+        <span class="text-xs text-gray-500">Session ended (exit {activeSession.exitCode})</span>
+        <button
+          onclick={() => closeTab(activeTabId)}
+          class="px-3 py-1 bg-gray-700 hover:bg-gray-600 rounded text-xs text-gray-300 font-medium transition-colors"
+        >
+          Close Tab
+        </button>
+      </div>
+    {/if}
+  </div>
+
+  <!-- Sidebar -->
+  {#if sidebarOpen}
+    <div class="w-72 bg-gray-900 border-l border-gray-800 flex flex-col shrink-0 overflow-auto">
+      <!-- Header -->
+      <div class="px-4 py-3 border-b border-gray-800 flex items-center justify-between">
+        <span class="text-sm font-medium text-gray-300">Session</span>
+        <button onclick={() => sidebarOpen = false} class="text-xs text-gray-600 hover:text-gray-400">Hide</button>
+      </div>
+
+      <!-- Config (collapsible) -->
+      <div class="border-b border-gray-800">
+        <button
+          onclick={() => configOpen = !configOpen}
+          class="w-full px-4 py-2 flex items-center justify-between text-xs text-gray-400 hover:text-gray-300 transition-colors"
+        >
+          <span>Config</span>
+          <span>{configOpen ? '▾' : '▸'}</span>
+        </button>
+
+        {#if configOpen}
+          <div class="px-4 pb-3 space-y-3">
+            {#if activeSession}
+              {@const s = activeSession}
+              {@const cfgDisabled = s.status === 'active' || s.status === 'creating'}
+              <div>
+                <label class="block text-xs text-gray-500 mb-1">Project</label>
+                {#if projects.length > 0}
+                  <select
+                    bind:value={s.projectPath}
+                    disabled={cfgDisabled}
+                    onchange={() => { s.label = labelFromPath(s.projectPath); sessions = sessions; }}
+                    class="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-xs text-gray-200 focus:outline-none focus:border-blue-500 disabled:opacity-50"
+                  >
+                    {#each projects as p}
+                      <option value={p.path}>{p.name}</option>
+                    {/each}
+                  </select>
+                {/if}
+                <input
+                  type="text"
+                  bind:value={s.projectPath}
+                  disabled={cfgDisabled}
+                  placeholder="/path/to/project"
+                  class="w-full mt-1 bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-xs text-gray-200 placeholder-gray-600 focus:outline-none focus:border-blue-500 font-mono disabled:opacity-50"
+                />
+              </div>
+              <div>
+                <label class="block text-xs text-gray-500 mb-1">Model</label>
+                <select
+                  bind:value={s.model}
+                  disabled={cfgDisabled}
+                  class="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-xs text-gray-200 focus:outline-none focus:border-blue-500 disabled:opacity-50"
+                >
+                  <option value="claude-sonnet-4-6">Sonnet 4.6</option>
+                  <option value="claude-opus-4-6">Opus 4.6</option>
+                  <option value="claude-haiku-4-5-20251001">Haiku 4.5</option>
+                  <option value="claude-sonnet-4-5">Sonnet 4.5</option>
+                  <option value="claude-opus-4-5">Opus 4.5</option>
+                </select>
+              </div>
+              <div>
+                <label class="block text-xs text-gray-500 mb-1">Permissions</label>
+                <select
+                  bind:value={s.permissionMode}
+                  disabled={cfgDisabled}
+                  class="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-xs text-gray-200 focus:outline-none focus:border-blue-500 disabled:opacity-50"
+                >
+                  <option value="default">Default</option>
+                  <option value="acceptEdits">Accept edits</option>
+                  <option value="bypassPermissions">Bypass all</option>
+                  <option value="plan">Plan (read-only)</option>
+                </select>
+              </div>
+              <div>
+                <label class="block text-xs text-gray-500 mb-1">Resume session ID</label>
+                <input
+                  type="text"
+                  bind:value={s.resumeSessionId}
+                  disabled={cfgDisabled}
+                  placeholder="Optional"
+                  class="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-xs text-gray-200 placeholder-gray-600 focus:outline-none focus:border-blue-500 font-mono disabled:opacity-50"
+                />
+              </div>
+              {#if s.status === 'idle'}
+                <button
+                  onclick={() => startSession()}
+                  disabled={!s.projectPath.trim()}
+                  class="w-full py-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 disabled:cursor-not-allowed text-white text-sm font-medium rounded transition-colors"
+                >Start Session</button>
+              {:else if s.status === 'creating'}
+                <button disabled class="w-full py-2 bg-blue-600/50 text-white/60 text-sm font-medium rounded cursor-not-allowed">Starting...</button>
+              {:else if s.status === 'active'}
+                <button
+                  onclick={() => endSession()}
+                  class="w-full py-2 bg-red-600/20 hover:bg-red-600/30 text-red-400 text-sm font-medium rounded border border-red-700/40 transition-colors"
+                >End Session</button>
+              {:else if s.status === 'ended'}
+                <button
+                  onclick={() => closeTab(activeTabId)}
+                  class="w-full py-2 bg-gray-700 hover:bg-gray-600 text-gray-200 text-sm font-medium rounded transition-colors"
+                >Close Tab</button>
+              {/if}
+            {:else}
+              <!-- No active session: bind to template config -->
+              <div>
+                <label class="block text-xs text-gray-500 mb-1">Project</label>
+                {#if projects.length > 0}
+                  <select
+                    bind:value={projectPath}
+                    class="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-xs text-gray-200 focus:outline-none focus:border-blue-500"
+                  >
+                    {#each projects as p}
+                      <option value={p.path}>{p.name}</option>
+                    {/each}
+                  </select>
+                {/if}
+                <input
+                  type="text"
+                  bind:value={projectPath}
+                  placeholder="/path/to/project"
+                  class="w-full mt-1 bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-xs text-gray-200 placeholder-gray-600 focus:outline-none focus:border-blue-500 font-mono"
+                />
+              </div>
+              <div>
+                <label class="block text-xs text-gray-500 mb-1">Model</label>
+                <select
+                  bind:value={model}
+                  class="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-xs text-gray-200 focus:outline-none focus:border-blue-500"
+                >
+                  <option value="claude-sonnet-4-6">Sonnet 4.6</option>
+                  <option value="claude-opus-4-6">Opus 4.6</option>
+                  <option value="claude-haiku-4-5-20251001">Haiku 4.5</option>
+                  <option value="claude-sonnet-4-5">Sonnet 4.5</option>
+                  <option value="claude-opus-4-5">Opus 4.5</option>
+                </select>
+              </div>
+              <div>
+                <label class="block text-xs text-gray-500 mb-1">Permissions</label>
+                <select
+                  bind:value={permissionMode}
+                  class="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-xs text-gray-200 focus:outline-none focus:border-blue-500"
+                >
+                  <option value="default">Default</option>
+                  <option value="acceptEdits">Accept edits</option>
+                  <option value="bypassPermissions">Bypass all</option>
+                  <option value="plan">Plan (read-only)</option>
+                </select>
+              </div>
+              <div>
+                <label class="block text-xs text-gray-500 mb-1">Resume session ID</label>
+                <input
+                  type="text"
+                  bind:value={resumeSessionId}
+                  placeholder="Optional"
+                  class="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-xs text-gray-200 placeholder-gray-600 focus:outline-none focus:border-blue-500 font-mono"
+                />
+              </div>
+              <button
+                onclick={() => {
+                  const id = addSession();
+                  startSession(id);
+                }}
+                disabled={!projectPath.trim()}
+                class="w-full py-2 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 disabled:cursor-not-allowed text-white text-sm font-medium rounded transition-colors"
+              >Start Session</button>
             {/if}
           </div>
-
-          <button
-            onclick={startSession}
-            disabled={!projectPath.trim() || state.status === 'creating'}
-            class="w-full py-2.5 bg-blue-600 hover:bg-blue-500 disabled:opacity-50 disabled:cursor-not-allowed text-white text-sm font-medium rounded-lg transition-colors"
-          >
-            {state.status === 'creating' ? 'Starting...' : 'Start Session'}
-          </button>
-        </div>
-      </div>
-    </div>
-
-  {:else}
-    <!-- ── Active chat view ── -->
-    <div class="flex-1 flex flex-col overflow-hidden">
-      <!-- Chat header -->
-      <div class="flex items-center gap-2 px-4 py-2.5 border-b border-gray-800 shrink-0">
-        <!-- Project name + session ID -->
-        <span class="text-xs text-gray-500 font-mono truncate">{state.projectPath.split('/').pop()}</span>
-        {#if state.claudeSessionId || state.sessionId}
-          <button
-            onclick={() => navigator.clipboard.writeText(state.claudeSessionId || state.sessionId || '')}
-            class="text-[10px] text-gray-600 hover:text-blue-400 transition-colors cursor-pointer font-mono"
-            title="Copy session ID: {state.claudeSessionId || state.sessionId || ''}"
-          >
-            {(state.claudeSessionId ?? state.sessionId ?? '').slice(0, 8)}
-          </button>
         {/if}
-
-        <span class="text-gray-700">|</span>
-
-        <!-- Model selector -->
-        <select
-          value={state.model}
-          onchange={(e) => {
-            const ws = getWsClient();
-            const newModel = e.currentTarget.value;
-            ws.updateSessionSettings(state.sessionId!, { model: newModel });
-            chatState.update(s => ({ ...s, model: newModel }));
-          }}
-          class="bg-gray-800 border border-gray-700 rounded px-2 py-0.5 text-xs text-gray-300 focus:outline-none focus:border-blue-500"
-        >
-          <option value="claude-sonnet-4-6">Sonnet 4.6</option>
-          <option value="claude-opus-4-6">Opus 4.6</option>
-          <option value="claude-haiku-4-5-20251001">Haiku 4.5</option>
-          <option value="claude-sonnet-4-5">Sonnet 4.5</option>
-          <option value="claude-opus-4-5">Opus 4.5</option>
-        </select>
-
-        <!-- Permission mode selector -->
-        <select
-          value={state.permissionMode}
-          onchange={(e) => {
-            const ws = getWsClient();
-            const newMode = e.currentTarget.value;
-            ws.updateSessionSettings(state.sessionId!, { permissionMode: newMode });
-            chatState.update(s => ({ ...s, permissionMode: newMode }));
-          }}
-          class="bg-gray-800 border border-gray-700 rounded px-2 py-0.5 text-xs text-gray-300 focus:outline-none focus:border-blue-500"
-        >
-          <option value="default">Default</option>
-          <option value="acceptEdits">Accept edits</option>
-          <option value="bypassPermissions">Bypass</option>
-          <option value="plan">Plan</option>
-        </select>
-
-        <!-- Status + controls -->
-        <div class="ml-auto flex items-center gap-2 shrink-0">
-          <button
-            onclick={() => showToolPanel = !showToolPanel}
-            class="text-[10px] text-gray-600 hover:text-gray-400 transition-colors"
-            title="Toggle tools panel"
-          >
-            Tools
-          </button>
-          {#if state.isStreaming}
-            <button
-              onclick={() => getWsClient().interruptSession(state.sessionId!)}
-              class="px-2 py-0.5 text-xs text-red-400 hover:text-red-300 border border-red-700/40 rounded hover:bg-red-900/20 transition-colors"
-            >
-              Stop
-            </button>
-          {/if}
-          {#if state.status === 'active' && !state.isStreaming}
-            <span class="flex items-center gap-1 text-xs text-green-500">
-              <span class="w-1.5 h-1.5 rounded-full bg-green-500"></span>
-              Ready
-            </span>
-          {:else if state.isStreaming}
-            <span class="flex items-center gap-1 text-xs text-blue-400">
-              <span class="w-1.5 h-1.5 rounded-full bg-blue-400 animate-pulse"></span>
-              Responding
-            </span>
-          {:else if state.status === 'waiting_approval'}
-            <span class="flex items-center gap-1 text-xs text-yellow-400">
-              <span class="w-1.5 h-1.5 rounded-full bg-yellow-400"></span>
-              Approval
-            </span>
-          {:else if state.status === 'ended'}
-            <span class="text-xs text-gray-500">Ended</span>
-          {/if}
-          {#if state.status === 'ended'}
-            <button
-              onclick={resetChat}
-              class="px-3 py-1 bg-blue-600 hover:bg-blue-500 rounded text-xs text-white font-medium transition-colors"
-            >
-              + New
-            </button>
-          {:else}
-            <button
-              onclick={() => {
-                const resumeId = state.claudeSessionId;
-                const path = state.projectPath;
-                const mdl = state.model;
-                const perm = state.permissionMode;
-                console.log('[Fork] claudeSessionId:', resumeId, 'sessionId:', state.sessionId, 'path:', path);
-                if (!path) {
-                  chatState.update(s => ({ ...s, error: 'Cannot fork: no project path' }));
-                  return;
-                }
-                if (!resumeId) {
-                  chatState.update(s => ({ ...s, error: 'Cannot fork: no Claude session ID (init event may not have fired)' }));
-                  return;
-                }
-                // End the current session first, then resume from it
-                endChatSession();
-                // Small delay to let the backend clean up the old session
-                setTimeout(() => {
-                  createChatSession({
-                    projectPath: path,
-                    model: mdl,
-                    resumeSessionId: resumeId,
-                    permissionMode: perm,
-                  });
-                }, 500);
-              }}
-              class="text-xs text-gray-600 hover:text-blue-400 transition-colors"
-              title="Fork session (end current, resume from same point)"
-            >
-              Fork
-            </button>
-            <button
-              onclick={endChatSession}
-              class="text-xs text-gray-600 hover:text-red-400 transition-colors"
-              title="End session"
-            >
-              End
-            </button>
-          {/if}
-        </div>
       </div>
 
-      <!-- Tool discovery panel (from system init) -->
-      {#if showToolPanel}
-        <div class="border-b border-gray-800 px-4 py-2 max-h-40 overflow-auto shrink-0 bg-gray-900/50">
-          <div class="flex items-center justify-between mb-1">
-            <span class="text-xs text-gray-500 font-medium">Available tools</span>
-            <button onclick={() => showToolPanel = false} class="text-[10px] text-gray-600 hover:text-gray-400">close</button>
-          </div>
-          <div class="flex flex-wrap gap-1">
-            {#each (state.availableCommands ?? []) as cmd}
-              <span class="px-1.5 py-0.5 bg-gray-800 rounded text-[10px] text-blue-400 font-mono">/{cmd.name}</span>
-            {/each}
-            {#each (state.availableAgents ?? []) as agent}
-              <span class="px-1.5 py-0.5 bg-gray-800 rounded text-[10px] text-purple-400 font-mono">@{agent.name}</span>
-            {/each}
-          </div>
-        </div>
-      {/if}
+      <!-- Subagents (collapsible) -->
+      {#if activeSessionSubagents.length > 0}
+        <div class="border-b border-gray-800">
+          <button
+            onclick={() => subagentsOpen = !subagentsOpen}
+            class="w-full px-4 py-2 flex items-center justify-between text-xs text-gray-400 hover:text-gray-300 transition-colors"
+          >
+            <span class="flex items-center gap-1.5">
+              Subagents
+              <span class="px-1.5 py-0.5 bg-gray-800 rounded-full text-[10px] text-gray-400">{activeSessionSubagents.length}</span>
+            </span>
+            <span>{subagentsOpen ? '▾' : '▸'}</span>
+          </button>
 
-      <!-- Messages -->
-      <div
-        bind:this={messagesContainer}
-        onscroll={handleScroll}
-        class="flex-1 overflow-auto p-4 space-y-4"
-      >
-        {#each state.messages as msg, msgIdx}
-          <!-- Replay divider: show after last replay message -->
-          {#if msg.isReplay && (msgIdx === state.messages.length - 1 || !state.messages[msgIdx + 1]?.isReplay)}
-            <!-- rendered after this message below -->
-          {/if}
-
-          <div class={msg.isReplay ? 'opacity-50' : ''}>
-          {#if msg.role === 'user'}
-            <div class="flex justify-end group">
-              <div class="max-w-[80%] bg-blue-600/20 border border-blue-600/30 rounded-2xl rounded-tr-md px-4 py-2.5 text-sm text-gray-200 relative">
-                {msg.text}
-                {#if msg.isReplay}
-                  <span class="text-[10px] text-gray-600 ml-2">from previous session</span>
-                {/if}
-                {#if enableFileCheckpointing && msg.uuid && !msg.isReplay}
-                  <button
-                    onclick={() => getWsClient().rewindSession(state.sessionId!, msg.uuid!, false)}
-                    class="absolute -left-16 top-1/2 -translate-y-1/2 opacity-0 group-hover:opacity-100 px-1.5 py-0.5 bg-gray-700/80 border border-gray-600 rounded text-[10px] text-gray-400 hover:text-orange-300 hover:border-orange-600/40 transition-all whitespace-nowrap"
-                  >
-                    Undo
-                  </button>
-                {/if}
-              </div>
-            </div>
-          {:else}
-            <div class="space-y-2">
-              <!-- Thinking -->
-              {#if msg.thinking}
-                <details class="border border-gray-800 rounded-lg overflow-hidden">
-                  <summary class="px-3 py-2 bg-gray-800/50 text-xs text-gray-500 cursor-pointer hover:text-gray-300">
-                    Thinking ({msg.thinking.length} chars)
-                  </summary>
-                  <div class="px-3 py-2 text-xs text-gray-500 font-mono whitespace-pre-wrap leading-relaxed max-h-48 overflow-auto">
-                    {msg.thinking}
+          {#if subagentsOpen}
+            <div class="px-3 pb-3 space-y-1.5">
+              {#each activeSessionSubagents as sa (sa.toolUseId)}
+                <div class="px-2 py-1.5 bg-gray-800/50 rounded border border-gray-800">
+                  <div class="flex items-center gap-1.5">
+                    <span class="w-2 h-2 rounded-full shrink-0 {sa.status === 'running' ? 'bg-green-400 animate-pulse' : sa.status === 'completed' ? 'bg-gray-500' : 'bg-red-400'}"></span>
+                    <span class="text-xs text-gray-300 truncate flex-1">{sa.description}</span>
+                    <span class="px-1 py-0.5 bg-gray-700 rounded text-[9px] text-gray-500 shrink-0">{sa.subagentType}</span>
                   </div>
-                </details>
-              {/if}
-              <!-- Text -->
-              {#if msg.text}
-                <div class="text-sm text-gray-200 leading-relaxed">
-                  <MarkdownRenderer content={msg.text} />
-                </div>
-              {/if}
-              <!-- Tool calls -->
-              {#each (msg.toolCalls ?? []) as tc}
-                {#if tc.name === 'Agent'}
-                  <!-- Agent invocation with special styling -->
-                  <details class="border border-purple-700/40 rounded-lg overflow-hidden" open>
-                    <summary class="flex items-center gap-2 px-3 py-2 bg-purple-900/20 cursor-pointer">
-                      <span class="text-xs font-mono text-purple-400">Agent: {tc.input?.subagent_type || 'general'}</span>
-                      <span class="text-xs text-gray-500 truncate">{tc.input?.description || ''}</span>
-                      <span class="text-xs ml-auto {tc.result ? 'text-green-500' : 'text-yellow-400'}">
-                        {tc.result ? 'done' : 'running...'}
-                      </span>
-                    </summary>
-                    {#if tc.result}
-                      <div class="px-3 py-2 text-xs text-gray-500 max-h-32 overflow-auto whitespace-pre-wrap">
-                        {tc.result.slice(0, 500)}{tc.result.length > 500 ? '...' : ''}
-                      </div>
-                    {/if}
-                  </details>
-                {:else}
-                  <div class="border border-gray-700/60 rounded-lg overflow-hidden">
-                    <div class="flex items-center gap-2 px-3 py-2 bg-gray-800/40">
-                      <span class="text-xs font-mono text-blue-400">{tc.name}</span>
-                      {#if tc.result !== undefined}
-                        <span class="text-xs {tc.isError ? 'text-red-400' : 'text-green-500'} ml-auto">
-                          {tc.isError ? 'error' : 'done'}
-                        </span>
-                      {/if}
+                  {#if sa.isBackground}
+                    <div class="flex items-center gap-1.5 mt-1">
+                      <span class="px-1 py-0.5 bg-blue-900/30 rounded text-[9px] text-blue-400">background</span>
+                      <button
+                        onclick={() => viewSubagentOutput(sa)}
+                        class="px-1.5 py-0.5 bg-gray-700 hover:bg-gray-600 rounded text-[9px] text-gray-300 transition-colors"
+                      >View</button>
                     </div>
-                    {#if tc.result}
-                      <div class="px-3 py-2 text-xs font-mono text-gray-500 max-h-24 overflow-auto whitespace-pre-wrap">
-                        {tc.result.slice(0, 500)}{tc.result.length > 500 ? '...' : ''}
-                      </div>
-                    {/if}
-                  </div>
-                {/if}
+                  {/if}
+                  {#if sa.status === 'completed' && sa.resultSummary}
+                    <div class="mt-1 text-[10px] text-gray-500 leading-tight line-clamp-3 break-all">{sa.resultSummary}</div>
+                  {/if}
+                </div>
               {/each}
-              <!-- Cost -->
-              {#if msg.cost}
-                <div class="text-right text-xs text-gray-700">${msg.cost.toFixed(4)}</div>
-              {/if}
             </div>
           {/if}
-          </div>
-
-          <!-- Replay divider after last replay message -->
-          {#if msg.isReplay && (msgIdx === state.messages.length - 1 || !state.messages[msgIdx + 1]?.isReplay)}
-            <div class="flex items-center gap-2 py-2 text-xs text-gray-600">
-              <div class="flex-1 h-px bg-gray-800"></div>
-              <span>Resumed session</span>
-              <div class="flex-1 h-px bg-gray-800"></div>
-            </div>
-          {/if}
-        {/each}
-
-        <!-- Streaming message -->
-        {#if state.isStreaming}
-          <StreamingMessage streaming={state.streaming} />
-        {/if}
-
-        <!-- Tool approval -->
-        {#if state.pendingApproval}
-          <ToolApproval
-            toolName={state.pendingApproval.toolName}
-            toolId={state.pendingApproval.toolId}
-            input={state.pendingApproval.input}
-            onApprove={approveToolUse}
-          />
-        {/if}
-
-        <!-- Session ended -->
-        {#if state.status === 'ended'}
-          <div class="text-center py-6">
-            <p class="text-xs text-gray-600">Session ended -- click <strong class="text-gray-400">+ New Session</strong> in the header to start a fresh chat</p>
-          </div>
-        {/if}
-
-        <!-- Error -->
-        {#if state.error}
-          <div class="text-sm text-red-400 bg-red-900/20 border border-red-700/50 rounded-lg px-3 py-2">
-            {state.error}
-          </div>
-        {/if}
-      </div>
-
-      <!-- Scroll to bottom button -->
-      {#if showScrollBtn}
-        <div class="absolute bottom-20 right-4">
-          <button
-            onclick={scrollToBottom}
-            class="flex items-center gap-1 px-3 py-1.5 bg-gray-700 border border-gray-600 rounded-full text-xs text-gray-300 shadow-lg hover:bg-gray-600"
-          >
-            Scroll to bottom
-          </button>
         </div>
       {/if}
 
-      <!-- Input -->
-      <ChatInput
-        disabled={state.status !== 'active' || state.isStreaming || !!state.pendingApproval}
-        onSend={handleSend}
-        onSlashCommand={handleSlashCommand}
-        availableCommands={state.availableCommands}
-        availableAgents={state.availableAgents}
-      />
+      <!-- Notes & bookmarks (only when active session has ptyId) -->
+      {#if activeSession?.ptyId}
+        <div class="px-4 py-3 space-y-3">
+          <div class="flex items-center gap-2">
+            <button
+              onclick={toggleBookmark}
+              class="text-lg transition-colors {activeSession.bookmarked ? 'text-yellow-400' : 'text-gray-700 hover:text-yellow-400'}"
+              title={activeSession.bookmarked ? 'Remove bookmark' : 'Bookmark session'}
+            >
+              {activeSession.bookmarked ? '★' : '☆'}
+            </button>
+            <span class="text-xs text-gray-500 font-mono">{activeSession.ptyId.slice(0, 8)}</span>
+          </div>
+
+          <!-- Tags -->
+          <div>
+            <label class="block text-xs text-gray-500 mb-1">Tags</label>
+            <div class="flex flex-wrap gap-1 mb-1.5">
+              {#each activeSession.tags as tag}
+                <span class="inline-flex items-center gap-1 px-1.5 py-0.5 bg-gray-800 rounded text-[10px] text-blue-400">
+                  {tag}
+                  <button onclick={() => removeTag(tag)} class="text-gray-600 hover:text-red-400">×</button>
+                </span>
+              {/each}
+            </div>
+            <div class="flex gap-1">
+              <input
+                type="text"
+                bind:value={tagInput}
+                onkeydown={(e) => { if (e.key === 'Enter') addTag(); }}
+                placeholder="Add tag..."
+                class="flex-1 bg-gray-800 border border-gray-700 rounded px-2 py-1 text-xs text-gray-200 placeholder-gray-600 focus:outline-none focus:border-blue-500"
+              />
+              <button onclick={addTag} class="px-2 py-1 text-xs text-gray-500 hover:text-blue-400 bg-gray-800 border border-gray-700 rounded">+</button>
+            </div>
+          </div>
+
+          <!-- Notes -->
+          <div>
+            <label class="block text-xs text-gray-500 mb-1">Notes</label>
+            <textarea
+              bind:value={activeSession.notes}
+              oninput={handleNotesInput}
+              rows="4"
+              placeholder="Session notes..."
+              class="w-full bg-gray-800 border border-gray-700 rounded px-2 py-1.5 text-xs text-gray-200 placeholder-gray-600 focus:outline-none focus:border-blue-500 resize-none"
+            ></textarea>
+          </div>
+        </div>
+      {/if}
     </div>
+  {:else}
+    <!-- Collapsed sidebar toggle -->
+    <button
+      onclick={() => sidebarOpen = true}
+      class="w-8 bg-gray-900 border-l border-gray-800 flex items-center justify-center text-gray-600 hover:text-gray-400 shrink-0"
+      title="Show sidebar"
+    >
+      <svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+        <path stroke-linecap="round" stroke-linejoin="round" d="M15 19l-7-7 7-7" />
+      </svg>
+    </button>
   {/if}
 </div>

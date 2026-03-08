@@ -5,8 +5,13 @@ import type {
   ChatCreatedMsg,
   ChatEventMsg,
   PtyOutputMsg,
+  PtyCreatedMsg,
+  PtyEndedMsg,
   ToolApprovalReqMsg,
   ChatSessionEndMsg,
+  SubagentInfo,
+  SubagentStartedMsg,
+  SubagentCompletedMsg,
 } from '$shared/types.js';
 
 type UpdateCallback = (entries: RawSessionEntry[]) => void;
@@ -15,6 +20,11 @@ type PtyOutputCallback = (sessionId: string, data: string) => void;
 type ToolApprovalCallback = (msg: ToolApprovalReqMsg) => void;
 type ChatEndCallback = (sessionId: string, exitCode: number) => void;
 type ChatCreatedCallback = (sessionId: string) => void;
+type PtyCreatedCallback = (sessionId: string) => void;
+type PtyEndedCallback = (sessionId: string, exitCode: number) => void;
+type SubagentStartedCallback = (ptySessionId: string, agent: SubagentInfo) => void;
+type SubagentCompletedCallback = (ptySessionId: string, toolUseId: string, resultSummary: string) => void;
+type SubagentOutputCallback = (ptySessionId: string, toolUseId: string, data: string) => void;
 
 export class LiveSessionClient {
   private ws: WebSocket | null = null;
@@ -31,7 +41,12 @@ export class LiveSessionClient {
   private toolApprovalCbs: ToolApprovalCallback[] = [];
   private chatEndCbs: ChatEndCallback[] = [];
   private chatCreatedCbs: ChatCreatedCallback[] = [];
+  private ptyCreatedCbs: PtyCreatedCallback[] = [];
+  private ptyEndedCbs: PtyEndedCallback[] = [];
   private errorCbs: ((message: string) => void)[] = [];
+  private subagentStartedCbs: SubagentStartedCallback[] = [];
+  private subagentCompletedCbs: SubagentCompletedCallback[] = [];
+  private subagentOutputCbs: SubagentOutputCallback[] = [];
 
   constructor(url?: string) {
     const isTauri = typeof window !== 'undefined' && '__TAURI__' in window;
@@ -84,6 +99,25 @@ export class LiveSessionClient {
         if (msg.type === 'session-end') {
           const m = msg as ChatSessionEndMsg;
           for (const cb of this.chatEndCbs) cb(m.sessionId, m.exitCode);
+        }
+        if (msg.type === 'pty-created') {
+          const m = msg as PtyCreatedMsg;
+          for (const cb of this.ptyCreatedCbs) cb(m.sessionId);
+        }
+        if (msg.type === 'pty-ended') {
+          const m = msg as PtyEndedMsg;
+          for (const cb of this.ptyEndedCbs) cb(m.sessionId, m.exitCode);
+        }
+        if (msg.type === 'subagent-started') {
+          const m = msg as SubagentStartedMsg;
+          for (const cb of this.subagentStartedCbs) cb(m.ptySessionId, m.agent);
+        }
+        if (msg.type === 'subagent-completed') {
+          const m = msg as SubagentCompletedMsg;
+          for (const cb of this.subagentCompletedCbs) cb(m.ptySessionId, m.toolUseId, m.resultSummary);
+        }
+        if (msg.type === 'subagent-output') {
+          for (const cb of this.subagentOutputCbs) cb(msg.ptySessionId, msg.toolUseId, msg.data);
         }
         if (msg.type === 'error') {
           for (const cb of this.errorCbs) cb(msg.message ?? 'Unknown error');
@@ -166,6 +200,30 @@ export class LiveSessionClient {
     this.send({ type: 'chat-end', sessionId });
   }
 
+  // ── PTY (interactive terminal) controls ─────────────────────────────────────
+  createPtySession(options: {
+    projectPath: string;
+    model?: string;
+    resumeSessionId?: string;
+    permissionMode?: string;
+    cols?: number;
+    rows?: number;
+  }): void {
+    this.send({ type: 'pty-create', ...options });
+  }
+
+  sendPtyInput(sessionId: string, data: string): void {
+    this.send({ type: 'pty-input', sessionId, data });
+  }
+
+  resizePty(sessionId: string, cols: number, rows: number): void {
+    this.send({ type: 'pty-resize', sessionId, cols, rows });
+  }
+
+  endPtySession(sessionId: string): void {
+    this.send({ type: 'pty-end', sessionId });
+  }
+
   // ── Chat event subscriptions ─────────────────────────────────────────────────
   onChatCreated(cb: ChatCreatedCallback): () => void {
     this.chatCreatedCbs.push(cb);
@@ -190,6 +248,31 @@ export class LiveSessionClient {
   onChatSessionEnd(cb: ChatEndCallback): () => void {
     this.chatEndCbs.push(cb);
     return () => { this.chatEndCbs = this.chatEndCbs.filter((c) => c !== cb); };
+  }
+
+  onPtyCreated(cb: PtyCreatedCallback): () => void {
+    this.ptyCreatedCbs.push(cb);
+    return () => { this.ptyCreatedCbs = this.ptyCreatedCbs.filter((c) => c !== cb); };
+  }
+
+  onPtyEnded(cb: PtyEndedCallback): () => void {
+    this.ptyEndedCbs.push(cb);
+    return () => { this.ptyEndedCbs = this.ptyEndedCbs.filter((c) => c !== cb); };
+  }
+
+  onSubagentStarted(cb: SubagentStartedCallback): () => void {
+    this.subagentStartedCbs.push(cb);
+    return () => { this.subagentStartedCbs = this.subagentStartedCbs.filter((c) => c !== cb); };
+  }
+
+  onSubagentCompleted(cb: SubagentCompletedCallback): () => void {
+    this.subagentCompletedCbs.push(cb);
+    return () => { this.subagentCompletedCbs = this.subagentCompletedCbs.filter((c) => c !== cb); };
+  }
+
+  onSubagentOutput(cb: SubagentOutputCallback): () => void {
+    this.subagentOutputCbs.push(cb);
+    return () => { this.subagentOutputCbs = this.subagentOutputCbs.filter((c) => c !== cb); };
   }
 
   onError(cb: (message: string) => void): () => void {

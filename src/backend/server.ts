@@ -12,6 +12,8 @@ import { chatRouter, setChatSessionManager } from './routes/chat.js';
 import { startFileWatcher, subscribeToSession, findMostRecentSessionFile } from './services/file-watcher.js';
 import { findSessionById } from './services/claude-data.js';
 import { SessionManager } from './services/session-manager.js';
+import { PtyManager } from './services/pty-manager.js';
+import type { SubagentInfo } from '../shared/types.js';
 import { loadMcpServers, saveMcpServers } from './services/mcp-config.js';
 import { loadTelegramConfig, saveTelegramConfig, maskConfig } from './services/telegram-config.js';
 import { TelegramBot } from './services/telegram-bot.js';
@@ -120,6 +122,12 @@ const wss = new WebSocketServer({ server, path: '/ws' });
 const chatSubscriptions = new Map<string, Set<WebSocket>>();
 
 let telegramBot: TelegramBot | null = null;
+
+// ── PTY manager (interactive terminal sessions) ──────────────────────────────
+const ptyManager = new PtyManager();
+const ptySubscriptions = new Map<string, Set<WebSocket>>();
+// Track which PTY sessions each WS owns (for cleanup on disconnect)
+const wsPtySubs = new Map<WebSocket, Set<string>>();
 
 const sessionManager = new SessionManager((sessionId, msg) => {
   // Notify WebSocket clients
@@ -264,6 +272,115 @@ wss.on('connection', (ws) => {
         }
       }
 
+      // ── PTY (interactive terminal) ──
+      if (msg.type === 'pty-create') {
+        const { projectPath, model, resumeSessionId, permissionMode, cols, rows } = msg;
+        if (!projectPath) {
+          ws.send(JSON.stringify({ type: 'error', message: 'projectPath required' }));
+          return;
+        }
+        try {
+          const id = crypto.randomUUID();
+          console.log(`[WS] pty-create: projectPath=${projectPath} model=${model}`);
+
+          // Wire output/exit events before creating (events fire synchronously sometimes)
+          if (!ptySubscriptions.has(id)) ptySubscriptions.set(id, new Set());
+          ptySubscriptions.get(id)!.add(ws);
+          if (!wsPtySubs.has(ws)) wsPtySubs.set(ws, new Set());
+          wsPtySubs.get(ws)!.add(id);
+
+          ptyManager.createSession({ id, projectPath, model, resumeSessionId, permissionMode, cols, rows });
+
+          // Wire output → subscribed WS clients
+          const outputHandler = (sessionId: string, data: string) => {
+            if (sessionId !== id) return;
+            const subs = ptySubscriptions.get(id);
+            if (!subs) return;
+            const payload = JSON.stringify({ type: 'pty-output', sessionId: id, data });
+            for (const client of subs) {
+              if (client.readyState === WebSocket.OPEN) client.send(payload);
+            }
+          };
+          const exitHandler = (sessionId: string, exitCode: number) => {
+            if (sessionId !== id) return;
+            const subs = ptySubscriptions.get(id);
+            if (!subs) return;
+            const payload = JSON.stringify({ type: 'pty-ended', sessionId: id, exitCode });
+            for (const client of subs) {
+              if (client.readyState === WebSocket.OPEN) client.send(payload);
+            }
+            ptySubscriptions.delete(id);
+            ptyManager.removeListener('pty-output', outputHandler);
+            ptyManager.removeListener('session-end', exitHandler);
+          };
+          ptyManager.on('pty-output', outputHandler);
+          ptyManager.on('session-end', exitHandler);
+
+          // Start watching for session JSONL to detect subagents
+          ptyManager.watchSessionJsonl(id, projectPath);
+
+          // Wire subagent events → subscribed WS clients
+          const subagentStartedHandler = (sessionId: string, agent: SubagentInfo) => {
+            if (sessionId !== id) return;
+            const subs = ptySubscriptions.get(id);
+            if (!subs) return;
+            const payload = JSON.stringify({ type: 'subagent-started', ptySessionId: id, agent });
+            for (const client of subs) {
+              if (client.readyState === WebSocket.OPEN) client.send(payload);
+            }
+          };
+          const subagentCompletedHandler = (sessionId: string, toolUseId: string, resultSummary: string) => {
+            if (sessionId !== id) return;
+            const subs = ptySubscriptions.get(id);
+            if (!subs) return;
+            const payload = JSON.stringify({ type: 'subagent-completed', ptySessionId: id, toolUseId, resultSummary });
+            for (const client of subs) {
+              if (client.readyState === WebSocket.OPEN) client.send(payload);
+            }
+          };
+          const subagentOutputHandler = (sessionId: string, toolUseId: string, outputData: string) => {
+            if (sessionId !== id) return;
+            const subs = ptySubscriptions.get(id);
+            if (!subs) return;
+            const payload = JSON.stringify({ type: 'subagent-output', ptySessionId: id, toolUseId, data: outputData });
+            for (const client of subs) {
+              if (client.readyState === WebSocket.OPEN) client.send(payload);
+            }
+          };
+          ptyManager.on('subagent-started', subagentStartedHandler);
+          ptyManager.on('subagent-completed', subagentCompletedHandler);
+          ptyManager.on('subagent-output', subagentOutputHandler);
+
+          // Clean up subagent listeners when session ends
+          const subagentExitCleanup = (sessionId: string) => {
+            if (sessionId !== id) return;
+            ptyManager.removeListener('subagent-started', subagentStartedHandler);
+            ptyManager.removeListener('subagent-completed', subagentCompletedHandler);
+            ptyManager.removeListener('subagent-output', subagentOutputHandler);
+            ptyManager.removeListener('session-end', subagentExitCleanup);
+          };
+          ptyManager.on('session-end', subagentExitCleanup);
+
+          ws.send(JSON.stringify({ type: 'pty-created', sessionId: id }));
+        } catch (e) {
+          console.error(`[WS] pty-create FAILED:`, e instanceof Error ? e.message : String(e));
+          ws.send(JSON.stringify({ type: 'error', message: e instanceof Error ? e.message : String(e) }));
+        }
+      }
+
+      if (msg.type === 'pty-input') {
+        ptyManager.sendInput(msg.sessionId, msg.data);
+      }
+
+      if (msg.type === 'pty-resize') {
+        ptyManager.resize(msg.sessionId, msg.cols, msg.rows);
+      }
+
+      if (msg.type === 'pty-end') {
+        ptyManager.killSession(msg.sessionId);
+        ptySubscriptions.delete(msg.sessionId);
+      }
+
     } catch (e) {
       console.error('[WS] Invalid message:', e);
     }
@@ -281,6 +398,17 @@ wss.on('connection', (ws) => {
       chatSubscriptions.get(sessionId)?.delete(ws);
     }
     wsChatSubs.delete(ws);
+    // Clean up PTY sessions owned by this client
+    const ptySubs = wsPtySubs.get(ws) ?? new Set();
+    for (const sessionId of ptySubs) {
+      ptySubscriptions.get(sessionId)?.delete(ws);
+      // Kill PTY if no more subscribers
+      if (!ptySubscriptions.get(sessionId)?.size) {
+        ptyManager.killSession(sessionId);
+        ptySubscriptions.delete(sessionId);
+      }
+    }
+    wsPtySubs.delete(ws);
   });
 });
 
