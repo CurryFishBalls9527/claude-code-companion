@@ -106,7 +106,7 @@
       </button>
     </header>
 
-    <main class="flex-1 overflow-auto p-5">
+    <main class="flex-1 {$page.url.pathname.startsWith('/chat') ? 'overflow-hidden' : 'overflow-auto p-5'}">
       {@render children()}
     </main>
   </div>
